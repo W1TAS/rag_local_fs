@@ -1,0 +1,26 @@
+
+# Gitignore для Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Виртуальные окружения
+venv/
+.env
+
+# FAISS и кэши
+faiss_index/
+metadata.db
+
+# Логи и временные файлы
+logs/
+*.tmp
+
+# MkDocs
+site/

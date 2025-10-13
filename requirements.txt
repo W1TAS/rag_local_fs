@@ -1,0 +1,5 @@
+# Зависимости (генерируются из pyproject.toml)
+# ollama
+# langchain
+# sentence-transformers
+# etc.
