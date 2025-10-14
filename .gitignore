@@ -15,6 +15,7 @@ venv/
 .env
 .idea
 assets/test_files
+models
 # FAISS и кэши
 faiss_index/
 metadata.db

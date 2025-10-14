@@ -4,7 +4,6 @@ import pickle
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain_core.documents import Document
 from config import SUPPORTED_FORMATS, EMBEDDING_MODEL
 import PyPDF2
 from docx import Document as DocxDocument
@@ -66,7 +65,11 @@ def build_index(folder_path, embedding_model):
     # Если индекс существует и файлы не изменились, загружаем его
     if os.path.exists(index_path) and not needs_reindex:
         print("Loading existing index...")
-        embeddings = HuggingFaceEmbeddings(model_name=embedding_model)
+        # Загружаем эмбеддинги с оффлайн-поддержкой
+        embeddings = HuggingFaceEmbeddings(
+            model_name=embedding_model,
+            model_kwargs={"local_files_only": True}  # Отключаем онлайн-запросы
+        )
         vectorstore = FAISS.load_local(index_path, embeddings, allow_dangerous_deserialization=True)
         return vectorstore
 
@@ -95,7 +98,11 @@ def build_index(folder_path, embedding_model):
         source_idx = min(i * num_texts // num_splits, num_texts - 1)
         split_metadatas.append(metadatas[source_idx].copy())
 
-    embeddings = HuggingFaceEmbeddings(model_name=embedding_model)
+    # Загружаем эмбеддинги с оффлайн-поддержкой
+    embeddings = HuggingFaceEmbeddings(
+        model_name=embedding_model,
+        model_kwargs={"local_files_only": True}  # Отключаем онлайн-запросы
+    )
     vectorstore = FAISS.from_texts(
         texts=split_texts,
         embedding=embeddings,
