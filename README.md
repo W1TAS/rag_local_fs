@@ -1,18 +1,17 @@
 # RAG Assistant
 
-Локальный интеллектуальный ассистент на основе RAG для поиска и анализа файлов (PDF, TXT, DOCX, PNG, JPG).
 
 ## Установка
 ```bash
-poetry install
+pip install -r requirements.txt
+Скачай ollama
+перезапусти IDE
+ollama pull electromagneticcyclone/t-lite-q:5_k_m
 ```
 
 ## Запуск
 ```bash
-python src/main.py
+python .\src\main.py C:\D\BSUIR\sem5\RAG\assets\test_files
 ```
 
 ## Этапы разработки
-1. Базовый RAG (индексация, поиск).
-2. UI (PyQt5, чат).
-3. Интеграция с ОС (ПКМ).

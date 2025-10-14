@@ -13,10 +13,12 @@ dist/
 # Виртуальные окружения
 venv/
 .env
-
+.idea
+assets/test_files
 # FAISS и кэши
 faiss_index/
 metadata.db
+*.pkl
 
 # Логи и временные файлы
 logs/
