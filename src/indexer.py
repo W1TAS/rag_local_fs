@@ -2,13 +2,12 @@ import os
 import time
 import pickle
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_ollama.embeddings import OllamaEmbeddings
 from langchain_community.vectorstores import FAISS
 from config import SUPPORTED_FORMATS, EMBEDDING_MODEL
 import PyPDF2
 from docx import Document as DocxDocument
 import bs4
-
 
 def extract_text(file_path):
     ext = os.path.splitext(file_path)[1].lower().lstrip(".")
@@ -35,7 +34,6 @@ def extract_text(file_path):
         print(f"Error extracting {file_path}: {e}")
         return ""
 
-
 def build_index(folder_path, embedding_model):
     index_path = "faiss_index"
     timestamp_path = "file_timestamps.pkl"
@@ -48,7 +46,7 @@ def build_index(folder_path, embedding_model):
             if os.path.splitext(path)[1].lower().lstrip(".") in SUPPORTED_FORMATS:
                 current_timestamps[path] = os.path.getmtime(path)
 
-    # Загружаем предыдущие временные метки, если есть
+    # Загружаем предыдущие временные метки
     try:
         with open(timestamp_path, "rb") as f:
             previous_timestamps = pickle.load(f)
@@ -62,14 +60,10 @@ def build_index(folder_path, embedding_model):
             needs_reindex = True
             break
 
-    # Если индекс существует и файлы не изменились, загружаем его
+    # Если индекс существует и файлы не изменились
     if os.path.exists(index_path) and not needs_reindex:
         print("Loading existing index...")
-        # Загружаем эмбеддинги с оффлайн-поддержкой
-        embeddings = HuggingFaceEmbeddings(
-            model_name=embedding_model,
-            model_kwargs={"local_files_only": True}  # Отключаем онлайн-запросы
-        )
+        embeddings = OllamaEmbeddings(model=embedding_model)
         vectorstore = FAISS.load_local(index_path, embeddings, allow_dangerous_deserialization=True)
         return vectorstore
 
@@ -89,20 +83,23 @@ def build_index(folder_path, embedding_model):
     if not texts:
         return None
 
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    split_texts = text_splitter.split_text("\n\n".join(texts))
-    num_texts = len(texts)
-    num_splits = len(split_texts)
+    # Разбиваем текст каждого файла отдельно
+    chunk_size = 1500
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=150)
+    split_texts = []
     split_metadatas = []
-    for i in range(num_splits):
-        source_idx = min(i * num_texts // num_splits, num_texts - 1)
-        split_metadatas.append(metadatas[source_idx].copy())
+    for i, text in enumerate(texts):
+        chunks = text_splitter.split_text(text)
+        split_texts.extend(chunks)
+        split_metadatas.extend([metadatas[i]] * len(chunks))
 
-    # Загружаем эмбеддинги с оффлайн-поддержкой
-    embeddings = HuggingFaceEmbeddings(
-        model_name=embedding_model,
-        model_kwargs={"local_files_only": True}  # Отключаем онлайн-запросы
-    )
+    # Проверяем метаданные
+    for meta in split_metadatas:
+        if "source" not in meta:
+            print(f"Warning: Missing source metadata for chunk")
+
+    # Загружаем эмбеддинги через Ollama
+    embeddings = OllamaEmbeddings(model=embedding_model)
     vectorstore = FAISS.from_texts(
         texts=split_texts,
         embedding=embeddings,

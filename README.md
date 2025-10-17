@@ -3,18 +3,19 @@
 
 ## Установка
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt (Там куча всякого, потому что я занёс туда все зависимости через pip freeze, возможно там будет что-то что не используется. К слову гарантий нет что всё сразу хорошо станет, потому что что-то я устанавливал через pip install -U. Но про это мне писалось в консоли когда что-то не срабатывало)
 Скачай ollama
 перезапусти IDE
-ollama pull electromagneticcyclone/t-lite-q:5_k_m
+ollama pull embeddinggemma:latest mistral:7b-instruct-v0.2-q4_0
 Установи CUDA если у тебя видюха NVIDIA, ещё cuDNN и перезапусти комп #у меня просто не работало без этого
-
-Запусти скрипт download_models.py, запускать нужно с доступом в интернет
+Если нет CUDA то лучше поставь сделай ollama pull gemma2:2b-instruct-q4_K_M и в конфиге поставь её как основную.
 ```
 
 ## Запуск
 ```bash
-python .\src\main.py C:\D\BSUIR\sem5\RAG\assets\test_files
+Останови ollama которая у тебя запущенна как процесс-демон 
+Во втором терминале сделай ollama serve
+В первом сделай python .\src\main.py C:\D\BSUIR\sem5\RAG\assets\test_files
 ```
 
 ## Этапы разработки

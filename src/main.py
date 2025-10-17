@@ -1,6 +1,7 @@
 import sys
 import time
 import psutil
+import os
 from config import MODEL_NAME, EMBEDDING_MODEL
 from indexer import build_index
 from rag import get_rag_chain
@@ -13,15 +14,12 @@ def detect_power_source():
     try:
         battery = psutil.sensors_battery()
         if battery is None:
-            # Нет батареи (десктоп) = всегда GPU
             return True
-
         if battery.power_plugged:
-            return True  # От сети = GPU
+            return True
         else:
-            return False  # От аккумулятора = CPU
+            return False
     except Exception:
-        # Ошибка = по умолчанию GPU
         return True
 
 
@@ -31,8 +29,6 @@ if __name__ == "__main__":
         sys.exit(1)
 
     folder_path = sys.argv[1]
-
-    # Определяем тип питания и режим
     use_gpu = detect_power_source()
     power_mode = "GPU mode (AC power)" if use_gpu else "CPU mode (Battery)"
 
@@ -54,17 +50,32 @@ if __name__ == "__main__":
             break
 
         start_time = time.time()
+        file_filter = None
+
         if " в " in query:
             file_name = query.split(" в ")[1].strip()
-            filtered_retriever = vectorstore.as_retriever(
-                search_kwargs={"k": 3, "filter": {"source": {"$contains": file_name}}}
-            )
-            qa_chain.retriever = filtered_retriever
+            file_path = os.path.join(folder_path, file_name)
+            if os.path.exists(file_path):
+                file_filter = file_path
+                print(f"Applying filter for file: {os.path.basename(file_path)}")
+            else:
+                print(f"Warning: File {file_name} not found in {folder_path}")
 
-        # Используем invoke вместо run (без предупреждений)
-        response = qa_chain.invoke({"query": query})["result"]
+        # Выполняем запрос
+        response = qa_chain(query, file_filter=file_filter)
+        answer = response["result"]
+        sources = response["sources"]
+
+        # Отладочный вывод
+        print("Retrieved documents:")
+        for doc in response["source_documents"]:
+            source_name = os.path.basename(doc.metadata.get('source', 'Неизвестный источник'))
+            print(f" - {source_name}: {doc.page_content[:100]}...")
+
+        print(f"Context preview: {response['formatted_context']}")
 
         elapsed = time.time() - start_time
-        print(f"Answer: {response}")
+        print(f"Sources: {sources}")
+        print(f"Answer: {answer}")
         print(f"Response time: {elapsed:.2f} seconds ({power_mode})")
         print("-" * 50)
