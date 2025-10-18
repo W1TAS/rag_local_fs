@@ -8,9 +8,6 @@ from rag import get_rag_chain
 
 
 def detect_power_source():
-    """
-    Определяет тип электропитания: True = от сети (GPU), False = от аккумулятора (CPU)
-    """
     try:
         battery = psutil.sensors_battery()
         if battery is None:
@@ -63,19 +60,18 @@ if __name__ == "__main__":
 
         # Выполняем запрос
         response = qa_chain(query, file_filter=file_filter)
+        # Используем 'result' для всех ответов
         answer = response["result"]
         sources = response["sources"]
 
-        # Отладочный вывод
+        # Выводим результаты
         print("Retrieved documents:")
         for doc in response["source_documents"]:
             source_name = os.path.basename(doc.metadata.get('source', 'Неизвестный источник'))
             print(f" - {source_name}: {doc.page_content[:100]}...")
 
         print(f"Context preview: {response['formatted_context']}")
-
-        elapsed = time.time() - start_time
         print(f"Sources: {sources}")
         print(f"Answer: {answer}")
-        print(f"Response time: {elapsed:.2f} seconds ({power_mode})")
+        print(f"Response time: {time.time() - start_time:.2f} seconds ({power_mode})")
         print("-" * 50)

@@ -1,10 +1,11 @@
 from langchain_ollama import ChatOllama
-from langchain.chains import RetrievalQA
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_ollama.embeddings import OllamaEmbeddings
+from langchain.chains import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
 import os
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 import numpy as np
 
 # Простой список стоп-слов на русском языке
@@ -48,6 +49,71 @@ def extract_keywords_from_query(query, top_n=5, min_length=4):
     return keywords
 
 
+def format_context_with_sources(docs, query):
+    """
+    Форматирует контекст, включая только релевантные чанки на основе извлечённых ключевых слов
+    """
+    keywords = extract_keywords_from_query(query, top_n=5)
+
+    formatted_chunks = []
+    for doc in docs:
+        doc_content = doc.page_content.lower()
+        keyword_matches = sum(1 for keyword in keywords if keyword in doc_content)
+
+        if keyword_matches > 0:
+            source_path = doc.metadata.get("source", "Неизвестный источник")
+            source_name = os.path.basename(source_path)
+            chunk = f"[Источник: {source_name}]\n{doc.page_content}\n"
+            formatted_chunks.append(chunk)
+
+    return "\n\n".join(formatted_chunks) if formatted_chunks else "Нет релевантного контекста"
+
+
+def summarize_documents(vectorstore, model_name, use_gpu=True):
+    """
+    Создает краткое описание содержимого всех документов в индексе.
+    Возвращает список вида: [{"file": имя_файла, "summary": краткое_описание}, ...]
+    """
+    llm = ChatOllama(
+        model=model_name,
+        num_gpu=1 if use_gpu else 0,
+        temperature=0.1,
+    )
+
+    # Шаблон для суммирования
+    summary_prompt = ChatPromptTemplate.from_template(
+        """Суммаризируй следующий текст в 1-2 предложениях, выделяя основную тему или содержание. 
+        Игнорируй метаданные, такие как [Источник: имя_файла]. 
+        Текст: {text}
+
+        Краткое описание:"""
+    )
+
+    # Группируем чанки по файлам
+    documents = vectorstore.docstore._dict.values()  # Получаем все документы из FAISS
+    file_chunks = defaultdict(list)
+    for doc in documents:
+        source = doc.metadata.get("source", "Неизвестный источник")
+        file_chunks[source].append(doc.page_content)
+
+    summaries = []
+    for source, chunks in file_chunks.items():
+        # Объединяем чанки одного файла, но ограничиваем объем (например, 2000 символов)
+        combined_text = "\n".join(chunks)[:2000]
+        source_name = os.path.basename(source)
+
+        # Суммируем содержимое
+        try:
+            response = llm.invoke(summary_prompt.format(text=combined_text))
+            summary = response.content.strip()
+        except Exception as e:
+            summary = f"Ошибка при суммировании: {e}"
+
+        summaries.append({"file": source_name, "summary": summary})
+
+    return summaries
+
+
 def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embeddinggemma:latest"):
     """
     Создает RAG-цепочку с автоматическим выбором GPU/CPU
@@ -70,60 +136,72 @@ def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embedd
 Контекст:
 {context}
 
-Вопрос: {question}
+Вопрос: {input}
 
 Ответ:"""
     )
 
-    qa_chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        chain_type="stuff",
-        retriever=vectorstore.as_retriever(search_kwargs={"k": 3}),
-        chain_type_kwargs={"prompt": prompt},
-        return_source_documents=True
-    )
+    # Создаем цепочку для обработки документов
+    document_chain = create_stuff_documents_chain(llm, prompt)
 
-    def format_context_with_sources(docs, query):
-        """
-        Форматирует контекст, включая только релевантные чанки на основе извлечённых ключевых слов
-        """
-        keywords = extract_keywords_from_query(query, top_n=5)
+    # Создаем ретривер
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
 
-        formatted_chunks = []
-        for doc in docs:
-            doc_content = doc.page_content.lower()
-            keyword_matches = sum(1 for keyword in keywords if keyword in doc_content)
-
-            if keyword_matches > 0:
-                source_path = doc.metadata.get("source", "Неизвестный источник")
-                source_name = os.path.basename(source_path)
-                chunk = f"[Источник: {source_name}]\n{doc.page_content}\n"
-                formatted_chunks.append(chunk)
-
-        return "\n\n".join(formatted_chunks) if formatted_chunks else "Нет релевантного контекста"
+    # Создаем RAG-цепочку
+    qa_chain = create_retrieval_chain(retriever, document_chain)
 
     def wrapped_qa_chain(query, file_filter=None):
         """
         Выполняет запрос с учётом фильтра по файлу и возвращает только релевантные источники
         """
+        # Проверяем, является ли запрос запросом на суммирование всех файлов
+        general_query_patterns = [
+            "о чём все документы", "опиши документы", "о чём эти файлы",
+            "что в файлах", "о чем файлы", "опиши файлы"
+        ]
+        is_general_query = any(pattern in query.lower() for pattern in general_query_patterns)
+
+        if is_general_query:
+            summaries = summarize_documents(vectorstore, model_name, use_gpu)
+            if not summaries:
+                return {
+                    "result": "Документы не найдены или не проиндексированы.",
+                    "source_documents": [],
+                    "sources": "Нет источников",
+                    "keywords": [],
+                    "formatted_context": ""
+                }
+
+            # Формируем ответ в виде списка
+            summary_text = "\n".join([f"- {s['file']}: {s['summary']}" for s in summaries])
+            return {
+                "result": f"Краткое описание файлов:\n{summary_text}",
+                "source_documents": [],
+                "sources": ", ".join([s["file"] for s in summaries]),
+                "keywords": [],
+                "formatted_context": ""
+            }
+
+        # Обработка специфичных запросов
         if file_filter:
             retriever = vectorstore.as_retriever(
                 search_kwargs={"k": 3, "filter": {"source": file_filter}}
             )
             qa_chain.retriever = retriever
 
-        result = qa_chain.invoke({"query": query})
-        source_documents = result["source_documents"]
-
+        # Выполняем запрос
+        result = qa_chain.invoke({"input": query})
+        source_documents = result["context"]
         keywords = extract_keywords_from_query(query, top_n=5)
         formatted_context = format_context_with_sources(source_documents, query)
 
+        # Повторно выполняем запрос с отформатированным контекстом
         final_result = qa_chain.invoke({
-            "query": query,
+            "input": query,
             "context": formatted_context
         })
 
-        answer = final_result["result"]
+        answer = final_result["answer"]
 
         relevant_sources = set()
         for doc in source_documents:
