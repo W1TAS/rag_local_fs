@@ -1,3 +1,4 @@
+# main.py
 import sys
 import time
 import psutil
@@ -6,19 +7,12 @@ from config import MODEL_NAME, EMBEDDING_MODEL
 from indexer import build_index
 from rag import get_rag_chain
 
-
 def detect_power_source():
     try:
         battery = psutil.sensors_battery()
-        if battery is None:
-            return True
-        if battery.power_plugged:
-            return True
-        else:
-            return False
-    except Exception:
+        return battery is None or battery.power_plugged
+    except:
         return True
-
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
@@ -36,7 +30,7 @@ if __name__ == "__main__":
         print("No supported documents found.")
         sys.exit(1)
 
-    qa_chain = get_rag_chain(vectorstore, MODEL_NAME, use_gpu=use_gpu)
+    qa_chain = get_rag_chain(vectorstore, MODEL_NAME, use_gpu=use_gpu, folder_path=folder_path)
 
     print(f"Index built/loaded. Ask questions: {power_mode}")
     print("-" * 50)
@@ -48,27 +42,25 @@ if __name__ == "__main__":
 
         start_time = time.time()
         file_filter = None
-
-        if " в " in query:
-            file_name = query.split(" в ")[1].strip()
+        if " в " in query.lower():
+            parts = query.lower().split(" в ")
+            file_name = parts[1].strip().strip('"\'')
             file_path = os.path.join(folder_path, file_name)
             if os.path.exists(file_path):
                 file_filter = file_path
-                print(f"Applying filter for file: {os.path.basename(file_path)}")
+                print(f"Фильтр: {os.path.basename(file_path)}")
             else:
-                print(f"Warning: File {file_name} not found in {folder_path}")
+                print(f"Файл не найден: {file_name}")
 
-        # Выполняем запрос
         response = qa_chain(query, file_filter=file_filter)
-        # Используем 'result' для всех ответов
         answer = response["result"]
         sources = response["sources"]
 
-        # Выводим результаты
         print("Retrieved documents:")
         for doc in response["source_documents"]:
             source_name = os.path.basename(doc.metadata.get('source', 'Неизвестный источник'))
-            print(f" - {source_name}: {doc.page_content[:100]}...")
+            doc_type = doc.metadata.get('type', 'document')
+            print(f" - {source_name} ({doc_type}): {doc.page_content[:100]}...")
 
         print(f"Context preview: {response['formatted_context']}")
         print(f"Sources: {sources}")

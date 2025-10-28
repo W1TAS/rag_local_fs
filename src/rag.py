@@ -1,14 +1,15 @@
+# rag.py — ПОЛНЫЙ, С ВЫВОДОМ ВСЕГО ТЕКСТА ИЗ ФАЙЛА
 import os
 import re
 import pickle
+import hashlib
 from collections import Counter, defaultdict
 import numpy as np
 from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
-from langchain.chains import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
+from config import SUPPORTED_FORMATS
 
-# Простой список стоп-слов на русском языке
+# === СТОП-СЛОВА ===
 RUSSIAN_STOP_WORDS = {
     'и', 'в', 'не', 'на', 'я', 'с', 'что', 'он', 'по', 'это', 'как', 'а', 'но', 'к', 'у',
     'да', 'ты', 'до', 'из', 'мы', 'за', 'бы', 'о', 'со', 'для', 'от', 'то', 'же', 'вы',
@@ -21,32 +22,44 @@ RUSSIAN_STOP_WORDS = {
     'где', 'когда', 'почему', 'как', 'отвечай', 'русском'
 }
 
+# === КЭШИРОВАНИЕ СУММ ===
+def get_folder_hash(folder_path):
+    hash_md5 = hashlib.md5()
+    for root, _, files in os.walk(folder_path):
+        for file in sorted(files):
+            path = os.path.join(root, file)
+            ext = os.path.splitext(path)[1].lower().lstrip(".")
+            if ext in SUPPORTED_FORMATS:
+                try:
+                    stat = os.stat(path)
+                    hash_md5.update(f"{file}:{stat.st_mtime}".encode())
+                except:
+                    pass
+    return hash_md5.hexdigest()
 
-def summarize_all_in_one(vectorstore, model_name, use_gpu=True):
+def summarize_all_in_one(vectorstore, model_name, use_gpu=True, folder_path=None):
     cache_file = "summary_cache.pkl"
+    hash_file = "summary_hash.txt"
+    current_hash = get_folder_hash(folder_path) if folder_path else ""
 
-    # Проверяем кэш
-    if os.path.exists(cache_file):
-        try:
+    if folder_path and os.path.exists(cache_file) and os.path.exists(hash_file):
+        with open(hash_file, "r", encoding="utf-8") as f:
+            cached_hash = f.read().strip()
+        if cached_hash == current_hash:
             with open(cache_file, "rb") as f:
                 return pickle.load(f)
-        except:
-            pass  # если кэш битый — пересчитаем
 
     llm = ChatOllama(model=model_name, num_gpu=1 if use_gpu else 0, temperature=0.1)
-
-    # Собираем уникальные файлы и короткие превью
     seen = set()
     previews = []
     for doc in vectorstore.docstore._dict.values():
         source = doc.metadata.get("source")
-        if source not in seen:
+        if source and source not in seen:
             seen.add(source)
             text = doc.page_content[:600]
             name = os.path.basename(source)
             previews.append(f"[Файл: {name}]\n{text}\n")
-
-    context = "\n".join(previews)[:6000]  # Ограничиваем
+    context = "\n".join(previews)[:6000]
 
     prompt = ChatPromptTemplate.from_template(
         """Ты — эксперт по кратким описаниям. 
@@ -65,118 +78,82 @@ def summarize_all_in_one(vectorstore, model_name, use_gpu=True):
     try:
         response = llm.invoke(prompt.format(context=context))
         result = response.content.strip()
-
-        # Сохраняем в кэш
-        with open(cache_file, "wb") as f:
-            pickle.dump(result, f)
-
+        if folder_path:
+            with open(cache_file, "wb") as f:
+                pickle.dump(result, f)
+            with open(hash_file, "w", encoding="utf-8") as f:
+                f.write(current_hash)
         return result
     except Exception as e:
         return f"Ошибка суммирования: {e}"
 
-def extract_keywords_from_query(query, top_n=5, min_length=4):
-    """
-    Извлекает ключевые слова из запроса пользователя
-    """
+# === КЛЮЧЕВЫЕ СЛОВА ===
+def extract_keywords_from_query(query, top_n=10, min_length=4):
     query_clean = re.sub(r'[^\w\s]', ' ', query.lower())
     words = query_clean.split()
+    filtered = [w for w in words if len(w) >= min_length and w not in RUSSIAN_STOP_WORDS]
+    freq = Counter(filtered)
+    total = len(filtered)
+    weights = {}
+    for word, f in freq.items():
+        tf = f / total if total > 0 else 0
+        idf = np.log(len(word) + 1) * np.log(f + 1)
+        weights[word] = tf * idf
+    return [k for k, _ in sorted(weights.items(), key=lambda x: -x[1])[:top_n]]
 
-    filtered_words = [
-        word for word in words
-        if len(word) >= min_length and word not in RUSSIAN_STOP_WORDS
-    ]
-
-    word_freq = Counter(filtered_words)
-    total_words = len(filtered_words)
-
-    word_weights = {}
-    for word, freq in word_freq.items():
-        tf = freq / total_words if total_words > 0 else 0
-        idf_like = np.log(len(word) + 1) * np.log(freq + 1)
-        word_weights[word] = tf * idf_like
-
-    sorted_keywords = sorted(word_weights.items(), key=lambda x: x[1], reverse=True)
-    keywords = [keyword for keyword, _ in sorted_keywords[:top_n]]
-
-    return keywords
-
-
-def format_context_with_sources(docs, query):
-    """
-    Форматирует контекст, включая только релевантные чанки на основе извлечённых ключевых слов
-    """
-    keywords = extract_keywords_from_query(query, top_n=5)
-
-    formatted_chunks = []
+# === ОЦЕНКА РЕЛЕВАНТНОСТИ ФАЙЛА ===
+def score_file_relevance(docs, query):
+    keywords = extract_keywords_from_query(query, top_n=10)
+    if not keywords:
+        return {}
+    file_scores = defaultdict(list)
     for doc in docs:
-        doc_content = doc.page_content.lower()
-        keyword_matches = sum(1 for keyword in keywords if keyword in doc_content)
+        source = os.path.basename(doc.metadata.get("source", "unknown"))
+        matches = sum(1 for kw in keywords if kw in doc.page_content.lower())
+        file_scores[source].append(matches)
+    avg_scores = {
+        source: sum(matches) / len(matches) if matches else 0
+        for source, matches in file_scores.items()
+    }
+    return avg_scores
 
-        if keyword_matches > 0:
-            source_path = doc.metadata.get("source", "Неизвестный источник")
-            source_name = os.path.basename(source_path)
-            chunk = f"[Источник: {source_name}]\n{doc.page_content}\n"
-            formatted_chunks.append(chunk)
+def select_best_file(docs, query):
+    avg_scores = score_file_relevance(docs, query)
+    return max(avg_scores, key=avg_scores.get) if avg_scores else None
 
-    return "\n\n".join(formatted_chunks) if formatted_chunks else "Нет релевантного контекста"
+# === ФОРМАТИРОВАНИЕ КОНТЕКСТА ===
+def format_context_with_sources(docs, query):
+    chunks = []
+    for doc in docs:
+        source = os.path.basename(doc.metadata.get("source", "Неизвестный"))
+        chunks.append(f"[Источник: {source}]\n{doc.page_content}\n")
+    return "\n\n".join(chunks) if chunks else "Нет релевантного контекста"
 
-
-def summarize_documents(vectorstore, model_name, use_gpu=True):
+# === НОВАЯ ФУНКЦИЯ: ВЫВОД ВСЕГО ТЕКСТА ИЗ ФАЙЛА ===
+def print_full_file_text(vectorstore, file_path):
     """
-    Создает краткое описание содержимого всех документов в индексе.
-    Возвращает список вида: [{"file": имя_файла, "summary": краткое_описание}, ...]
+    Выводит в консоль ВЕСЬ текст из указанного файла (все чанки).
     """
-    llm = ChatOllama(
-        model=model_name,
-        num_gpu=1 if use_gpu else 0,
-        temperature=0.1,
-    )
+    print("\n" + "="*80)
+    print(f"ПОЛНЫЙ ТЕКСТ ФАЙЛА: {os.path.basename(file_path)}")
+    print("="*80)
+    full_text = []
+    for doc in vectorstore.docstore._dict.values():
+        if doc.metadata.get("source") == file_path:
+            full_text.append(doc.page_content)
+    print("\n".join(full_text))
+    print("\n" + "="*80)
+    print(f"Всего чанков: {len(full_text)}")
+    print("="*80 + "\n")
 
-    # Шаблон для суммирования
-    summary_prompt = ChatPromptTemplate.from_template(
-        """Суммаризируй следующий текст в 1-2 предложениях, выделяя основную тему или содержание. 
-        Игнорируй метаданные, такие как [Источник: имя_файла]. 
-        Текст: {text}
-
-        Краткое описание:"""
-    )
-
-    # Группируем чанки по файлам
-    documents = vectorstore.docstore._dict.values()  # Получаем все документы из FAISS
-    file_chunks = defaultdict(list)
-    for doc in documents:
-        source = doc.metadata.get("source", "Неизвестный источник")
-        file_chunks[source].append(doc.page_content)
-
-    summaries = []
-    for source, chunks in file_chunks.items():
-        # Объединяем чанки одного файла, но ограничиваем объем (например, 2000 символов)
-        combined_text = "\n".join(chunks)[:2000]
-        source_name = os.path.basename(source)
-
-        # Суммируем содержимое
-        try:
-            response = llm.invoke(summary_prompt.format(text=combined_text))
-            summary = response.content.strip()
-        except Exception as e:
-            summary = f"Ошибка при суммировании: {e}"
-
-        summaries.append({"file": source_name, "summary": summary})
-
-    return summaries
-
-
-def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embeddinggemma:latest"):
+# === ОСНОВНАЯ ЦЕПОЧКА ===
+def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embeddinggemma:latest", folder_path=None):
+    global llm
     llm = ChatOllama(model=model_name, num_gpu=1 if use_gpu else 0, temperature=0.1)
 
     prompt = ChatPromptTemplate.from_template(
-        """Ты интеллектуальный ассистент. Используй только предоставленный контекст для ответа на вопрос.
-
-Инструкции:
-- Отвечай только на основе содержимого документов, игнорируя строки с метаданными в формате [Источник: имя_файла]
-- Если информации нет в содержимом контекста, скажи "Информация отсутствует в доступных документах"
-- Не включай в ответ метаданные, такие как [Источник: имя_файла] или номера документов, если об этом не просит пользователь
-- Отвечай кратко и по существу, используя только релевантную информацию из текста документа
+        """Ты — точный ассистент. Отвечай ТОЛЬКО на основе контекста.
+Если информации нет — скажи "Информация отсутствует в доступных документах".
 
 Контекст:
 {context}
@@ -186,23 +163,17 @@ def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embedd
 Ответ:"""
     )
 
-    document_chain = create_stuff_documents_chain(llm, prompt)
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-    qa_chain = create_retrieval_chain(retriever, document_chain)
-
     def wrapped_qa_chain(query, file_filter=None):
         query_lower = query.lower().strip()
 
-        # === РАСШИРЕННЫЕ ПАТТЕРНЫ ===
+        # === ОБЩИЕ ЗАПРОСЫ ===
         general_patterns = [
             "о чём файлы", "что в файлах", "опиши файлы",
             "о чем файлы", "о чём эти файлы", "о чём все файлы",
             "что в этих файлах", "опиши содержимое", "о чём документы"
         ]
-        is_general = any(p in query_lower for p in general_patterns)
-
-        if is_general:
-            summary = summarize_all_in_one(vectorstore, model_name, use_gpu)
+        if any(p in query_lower for p in general_patterns):
+            summary = summarize_all_in_one(vectorstore, model_name, use_gpu, folder_path=folder_path)
             return {
                 "result": f"Краткое описание файлов:\n{summary}",
                 "source_documents": [],
@@ -211,50 +182,47 @@ def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embedd
                 "formatted_context": ""
             }
 
-        # Обработка специфичных запросов
+        # === РЕТРИВЕР ===
+        search_kwargs = {"k": 10}
         if file_filter:
-            retriever = vectorstore.as_retriever(
-                search_kwargs={"k": 3, "filter": {"source": file_filter}}
-            )
-            qa_chain.retriever = retriever
+            search_kwargs["filter"] = {"source": file_filter}
+        retriever = vectorstore.as_retriever(search_kwargs=search_kwargs)
+        raw_docs = retriever.invoke(query)
 
-        # Выполняем запрос
-        result = qa_chain.invoke({"input": query})
-        source_documents = result["context"]
-        keywords = extract_keywords_from_query(query, top_n=5)
-        formatted_context = format_context_with_sources(source_documents, query)
+        if not raw_docs:
+            return {
+                "result": "Информация отсутствует в доступных документах",
+                "source_documents": [],
+                "sources": "Нет источников",
+                "keywords": extract_keywords_from_query(query, top_n=7),
+                "formatted_context": ""
+            }
 
-        # Повторно выполняем запрос с отформатированным контекстом
-        final_result = qa_chain.invoke({
-            "input": query,
-            "context": formatted_context
-        })
+        # === ВЫБОР ЛУЧШЕГО ФАЙЛА ===
+        best_file = select_best_file(raw_docs, query)
+        file_path = next((d.metadata["source"] for d in raw_docs if os.path.basename(d.metadata["source"]) == best_file), None)
 
-        answer = final_result["answer"]
+        # === ВЫВОДИМ ВЕСЬ ТЕКСТ ФАЙЛА В КОНСОЛЬ ===
+        # if file_path:
+        #     print_full_file_text(vectorstore, file_path)
 
-        relevant_sources = set()
-        for doc in source_documents:
-            doc_content = doc.page_content.lower()
-            keyword_matches = sum(1 for keyword in keywords if keyword in doc_content)
-            if keyword_matches > 0:
-                source_path = doc.metadata.get("source", "Неизвестный источник")
-                source_name = os.path.basename(source_path)
-                relevant_sources.add(source_name)
+        # === ФОРМИРУЕМ КОНТЕКСТ ИЗ ЛУЧШЕГО ФАЙЛА ===
+        final_docs = [
+            doc for doc in raw_docs
+            if os.path.basename(doc.metadata.get("source", "")) == best_file
+        ]
 
-        print(f"Query: {query}")
-        print(f"Extracted keywords: {keywords}")
-        for doc in source_documents:
-            source_name = os.path.basename(doc.metadata.get("source", "Неизвестный источник"))
-            doc_content = doc.page_content.lower()
-            keyword_matches = sum(1 for keyword in keywords if keyword in doc_content)
-            print(f"Chunk from {source_name} (matches: {keyword_matches}): {doc.page_content[:100]}...")
+        context = format_context_with_sources(final_docs, query)
+        answer = llm.invoke(prompt.format(context=context, input=query)).content.strip()
+
+        sources = {best_file}
 
         return {
             "result": answer,
-            "source_documents": source_documents,
-            "sources": ", ".join(relevant_sources) if relevant_sources else "Нет релевантных источников",
-            "keywords": keywords,
-            "formatted_context": formatted_context[:500] + "..." if len(formatted_context) > 500 else formatted_context
+            "source_documents": final_docs,
+            "sources": ", ".join(sources),
+            "keywords": extract_keywords_from_query(query, top_n=7),
+            "formatted_context": context[:500] + "..." if len(context) > 500 else context
         }
 
     return wrapped_qa_chain
