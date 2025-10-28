@@ -1,12 +1,12 @@
-from langchain_ollama import ChatOllama
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_ollama.embeddings import OllamaEmbeddings
-from langchain.chains import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
 import os
 import re
+import pickle
 from collections import Counter, defaultdict
 import numpy as np
+from langchain_ollama import ChatOllama
+from langchain_core.prompts import ChatPromptTemplate
+from langchain.chains import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
 
 # Простой список стоп-слов на русском языке
 RUSSIAN_STOP_WORDS = {
@@ -21,6 +21,58 @@ RUSSIAN_STOP_WORDS = {
     'где', 'когда', 'почему', 'как', 'отвечай', 'русском'
 }
 
+
+def summarize_all_in_one(vectorstore, model_name, use_gpu=True):
+    cache_file = "summary_cache.pkl"
+
+    # Проверяем кэш
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, "rb") as f:
+                return pickle.load(f)
+        except:
+            pass  # если кэш битый — пересчитаем
+
+    llm = ChatOllama(model=model_name, num_gpu=1 if use_gpu else 0, temperature=0.1)
+
+    # Собираем уникальные файлы и короткие превью
+    seen = set()
+    previews = []
+    for doc in vectorstore.docstore._dict.values():
+        source = doc.metadata.get("source")
+        if source not in seen:
+            seen.add(source)
+            text = doc.page_content[:600]
+            name = os.path.basename(source)
+            previews.append(f"[Файл: {name}]\n{text}\n")
+
+    context = "\n".join(previews)[:6000]  # Ограничиваем
+
+    prompt = ChatPromptTemplate.from_template(
+        """Ты — эксперт по кратким описаниям. 
+        Прочитай фрагменты из файлов ниже. Для КАЖДОГО файла дай описание в 1 предложение.
+
+        Формат ответа:
+        - имя_файла.pdf: Краткое описание.
+        - имя_файла.docx: Ещё одно.
+
+        Файлы:
+        {context}
+
+        Ответ:"""
+    )
+
+    try:
+        response = llm.invoke(prompt.format(context=context))
+        result = response.content.strip()
+
+        # Сохраняем в кэш
+        with open(cache_file, "wb") as f:
+            pickle.dump(result, f)
+
+        return result
+    except Exception as e:
+        return f"Ошибка суммирования: {e}"
 
 def extract_keywords_from_query(query, top_n=5, min_length=4):
     """
@@ -115,14 +167,7 @@ def summarize_documents(vectorstore, model_name, use_gpu=True):
 
 
 def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embeddinggemma:latest"):
-    """
-    Создает RAG-цепочку с автоматическим выбором GPU/CPU
-    """
-    llm = ChatOllama(
-        model=model_name,
-        num_gpu=1 if use_gpu else 0,
-        temperature=0.1,
-    )
+    llm = ChatOllama(model=model_name, num_gpu=1 if use_gpu else 0, temperature=0.1)
 
     prompt = ChatPromptTemplate.from_template(
         """Ты интеллектуальный ассистент. Используй только предоставленный контекст для ответа на вопрос.
@@ -141,43 +186,27 @@ def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embedd
 Ответ:"""
     )
 
-    # Создаем цепочку для обработки документов
     document_chain = create_stuff_documents_chain(llm, prompt)
-
-    # Создаем ретривер
     retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-
-    # Создаем RAG-цепочку
     qa_chain = create_retrieval_chain(retriever, document_chain)
 
     def wrapped_qa_chain(query, file_filter=None):
-        """
-        Выполняет запрос с учётом фильтра по файлу и возвращает только релевантные источники
-        """
-        # Проверяем, является ли запрос запросом на суммирование всех файлов
-        general_query_patterns = [
-            "о чём все документы", "опиши документы", "о чём эти файлы",
-            "что в файлах", "о чем файлы", "опиши файлы"
+        query_lower = query.lower().strip()
+
+        # === РАСШИРЕННЫЕ ПАТТЕРНЫ ===
+        general_patterns = [
+            "о чём файлы", "что в файлах", "опиши файлы",
+            "о чем файлы", "о чём эти файлы", "о чём все файлы",
+            "что в этих файлах", "опиши содержимое", "о чём документы"
         ]
-        is_general_query = any(pattern in query.lower() for pattern in general_query_patterns)
+        is_general = any(p in query_lower for p in general_patterns)
 
-        if is_general_query:
-            summaries = summarize_documents(vectorstore, model_name, use_gpu)
-            if not summaries:
-                return {
-                    "result": "Документы не найдены или не проиндексированы.",
-                    "source_documents": [],
-                    "sources": "Нет источников",
-                    "keywords": [],
-                    "formatted_context": ""
-                }
-
-            # Формируем ответ в виде списка
-            summary_text = "\n".join([f"- {s['file']}: {s['summary']}" for s in summaries])
+        if is_general:
+            summary = summarize_all_in_one(vectorstore, model_name, use_gpu)
             return {
-                "result": f"Краткое описание файлов:\n{summary_text}",
+                "result": f"Краткое описание файлов:\n{summary}",
                 "source_documents": [],
-                "sources": ", ".join([s["file"] for s in summaries]),
+                "sources": "все файлы",
                 "keywords": [],
                 "formatted_context": ""
             }
