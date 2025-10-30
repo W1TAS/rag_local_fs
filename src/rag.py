@@ -215,7 +215,7 @@ def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embedd
         context = format_context_with_sources(final_docs, query)
         answer = llm.invoke(prompt.format(context=context, input=query)).content.strip()
 
-        sources = {best_file}
+        sources = {best_file} if best_file else set()
 
         return {
             "result": answer,

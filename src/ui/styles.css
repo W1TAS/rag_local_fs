@@ -1,0 +1,50 @@
+QMainWindow, QWidget {
+    background: #000000;
+    color: #E0E0E0;
+}
+
+QLineEdit {
+    background: #1A1A1A;
+    color: #FFFFFF;
+    border: 1px solid #333;
+    border-radius: 20px;
+    padding: 12px 20px;
+    font-size: 14px;
+}
+QLineEdit:focus { border: 1px solid #1DA1F2; }
+
+QPushButton {
+    background: #1DA1F2;
+    color: white;
+    border: none;
+    border-radius: 20px;
+    padding: 12px 24px;
+    font-weight: bold;
+}
+QPushButton:hover { background: #1991DB; }
+
+QLabel { background: transparent; }
+
+.user-message {
+    background: #1DA1F2;
+    color: white;
+    padding: 12px 18px;
+    border-radius: 18px;
+    font-size: 14px;
+    margin: 4px 12px;
+}
+.assistant-message {
+    background: #2A2A2A;
+    color: #E0E0E0;
+    padding: 12px 18px;
+    border-radius: 18px;
+    font-size: 14px;
+    margin: 4px 12px;
+}
+.typing {
+    font-style: italic;
+    color: #888;
+    margin: 4px 12px;
+}
+
+.message-widget { opacity: 0; }

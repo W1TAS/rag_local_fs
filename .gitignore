@@ -11,9 +11,10 @@ dist/
 *.egg
 
 # Виртуальные окружения
+.venv/
 venv/
 .env
-.idea
+.idea/
 assets/test_files
 models
 # FAISS и кэши
