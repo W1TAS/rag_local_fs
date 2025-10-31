@@ -7,7 +7,7 @@ from collections import Counter, defaultdict
 import numpy as np
 from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
-from config import SUPPORTED_FORMATS
+from src.config import SUPPORTED_FORMATS
 
 # === СТОП-СЛОВА ===
 RUSSIAN_STOP_WORDS = {

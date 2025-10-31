@@ -3,18 +3,18 @@ import os
 import psutil
 import traceback
 from typing import Optional, Dict, Any, Callable
-from PyQt5.QtCore import QObject, pyqtSignal, QRunnable, QThreadPool
-from indexer import build_index
-from rag import get_rag_chain
-from config import MODEL_NAME, EMBEDDING_MODEL
+from PySide6.QtCore import QObject, Signal, QRunnable, QThreadPool
+from src.indexer import build_index
+from src.rag import get_rag_chain
+from src.config import MODEL_NAME, EMBEDDING_MODEL
 
 
 class IndexingSignals(QObject):
-    finished = pyqtSignal()
-    error = pyqtSignal(str)
+    finished = Signal()
+    error = Signal(str)
 
 class AskSignals(QObject):
-    result = pyqtSignal(dict)
+    result = Signal(dict)
 
 
 class IndexingRunnable(QRunnable):
@@ -76,9 +76,9 @@ class AskRunnable(QRunnable):
 
 
 class RAGCoordinator(QObject):
-    indexing_started = pyqtSignal()
-    indexing_finished = pyqtSignal()
-    indexing_error = pyqtSignal(str)
+    indexing_started = Signal()
+    indexing_finished = Signal()
+    indexing_error = Signal(str)
 
     _instance = None
 

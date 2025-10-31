@@ -1,9 +1,9 @@
 # src/ui/main_window.py
 import os
 import shutil
-from PyQt5 import QtWidgets, QtCore, QtGui
-from coordinator import RAGCoordinator
-from ui.tray import create_tray_icon
+from PySide6 import QtWidgets, QtCore, QtGui
+from src.coordinator import RAGCoordinator
+from src.ui.tray import create_tray_icon
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -61,7 +61,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.css = f.read()
 
     def _setup_tray(self):
-        from PyQt5.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication
         self.tray_icon = create_tray_icon(QApplication.instance())
         self.tray_icon.run_detached()
 
