@@ -4,9 +4,9 @@ import psutil
 import traceback
 from typing import Optional, Dict, Any, Callable
 from PySide6.QtCore import QObject, Signal, QRunnable, QThreadPool
-from src.indexer import build_index
-from src.rag import get_rag_chain
-from src.config import MODEL_NAME, EMBEDDING_MODEL
+from indexer import build_index
+from rag import get_rag_chain
+from config import MODEL_NAME, EMBEDDING_MODEL
 
 
 class IndexingSignals(QObject):
@@ -26,6 +26,8 @@ class IndexingRunnable(QRunnable):
 
     def run(self):
         try:
+            if getattr(self.coordinator, "closing", False):
+                return
             vectorstore = build_index(self.coordinator.folder_path, EMBEDDING_MODEL)
             if vectorstore:
                 self.coordinator.vectorstore = vectorstore
@@ -34,9 +36,17 @@ class IndexingRunnable(QRunnable):
                     use_gpu=self.coordinator.use_gpu,
                     folder_path=self.coordinator.folder_path
                 )
-            self.signals.finished.emit()
+            try:
+                if not getattr(self.coordinator, "closing", False):
+                    self.signals.finished.emit()
+            except RuntimeError:
+                pass
         except Exception as e:
-            self.signals.error.emit(traceback.format_exc())
+            try:
+                if not getattr(self.coordinator, "closing", False):
+                    self.signals.error.emit(traceback.format_exc())
+            except RuntimeError:
+                pass
         finally:
             if hasattr(self.coordinator, 'active_runnables'):
                 self.coordinator.active_runnables = [
@@ -55,8 +65,13 @@ class AskRunnable(QRunnable):
 
     def run(self):
         try:
+            if getattr(self.coordinator, "closing", False):
+                return
             if not self.coordinator.qa_chain:
-                self.signals.result.emit({"result": "Индексация не завершена.", "sources": ""})
+                try:
+                    self.signals.result.emit({"result": "Индексация не завершена.", "sources": ""})
+                except RuntimeError:
+                    pass
                 return
             response = self.coordinator.qa_chain(self.query, file_filter=self.file_filter)
             sources = response.get("sources", "")
@@ -65,9 +80,17 @@ class AskRunnable(QRunnable):
             elif not sources:
                 sources = "Неизвестно"
             response["sources"] = sources
-            self.signals.result.emit(response)
+            try:
+                if not getattr(self.coordinator, "closing", False):
+                    self.signals.result.emit(response)
+            except RuntimeError:
+                pass
         except Exception as e:
-            self.signals.result.emit({"result": f"Ошибка: {e}", "sources": ""})
+            try:
+                if not getattr(self.coordinator, "closing", False):
+                    self.signals.result.emit({"result": f"Ошибка: {e}", "sources": ""})
+            except RuntimeError:
+                pass
         finally:
             if hasattr(self.coordinator, 'active_runnables'):
                 self.coordinator.active_runnables = [
@@ -98,6 +121,7 @@ class RAGCoordinator(QObject):
         self.vectorstore = None
         self.qa_chain = None
         self.is_indexing = False
+        self.closing = False
         self.use_gpu = self._detect_gpu()
         self.threadpool = QThreadPool.globalInstance()
         self.active_runnables = []
@@ -122,6 +146,28 @@ class RAGCoordinator(QObject):
         runnable.signals.error.connect(self._indexing_error)
         self.active_runnables.append(runnable)
         self.threadpool.start(runnable)
+
+    def close(self):
+        """Gracefully release resources on application shutdown."""
+        try:
+            # Mark as closing to let future tasks no-op
+            self.closing = True
+            self.is_indexing = False
+            # Best-effort: clear refs to allow GC
+            self.active_runnables = []
+            self.qa_chain = None
+            self.vectorstore = None
+            try:
+                self.threadpool.clear()
+            except Exception:
+                pass
+            try:
+                # Wait briefly for running tasks to finish
+                self.threadpool.waitForDone(1000)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     def _indexing_done(self):
         self.is_indexing = False

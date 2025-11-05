@@ -5,9 +5,10 @@ import pickle
 import hashlib
 from collections import Counter, defaultdict
 import numpy as np
+import requests
 from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
-from src.config import SUPPORTED_FORMATS
+from config import SUPPORTED_FORMATS
 
 # === СТОП-СЛОВА ===
 RUSSIAN_STOP_WORDS = {
@@ -37,6 +38,13 @@ def get_folder_hash(folder_path):
                     pass
     return hash_md5.hexdigest()
 
+def _ollama_available():
+    try:
+        resp = requests.get("http://127.0.0.1:11434/api/tags", timeout=2)
+        return resp.status_code == 200
+    except Exception:
+        return False
+
 def summarize_all_in_one(vectorstore, model_name, use_gpu=True, folder_path=None):
     cache_file = "summary_cache.pkl"
     hash_file = "summary_hash.txt"
@@ -49,7 +57,18 @@ def summarize_all_in_one(vectorstore, model_name, use_gpu=True, folder_path=None
             with open(cache_file, "rb") as f:
                 return pickle.load(f)
 
-    llm = ChatOllama(model=model_name, num_gpu=1 if use_gpu else 0, temperature=0.1)
+    if not _ollama_available():
+        return "Локальный сервер моделей (Ollama) недоступен. Запустите 'ollama serve' и выполните 'ollama pull' для нужных моделей."
+    try:
+        try:
+            llm = ChatOllama(model=model_name, num_gpu=1 if use_gpu else 0, temperature=0.1,
+                             base_url="http://127.0.0.1:11434", keep_alive="5m", timeout=60)
+        except TypeError:
+            # Fallback for older client without keep_alive/timeout
+            llm = ChatOllama(model=model_name, num_gpu=1 if use_gpu else 0, temperature=0.1,
+                             base_url="http://127.0.0.1:11434")
+    except Exception as e:
+        return f"Ошибка инициализации модели: {e}"
     seen = set()
     previews = []
     for doc in vectorstore.docstore._dict.values():
@@ -149,7 +168,18 @@ def print_full_file_text(vectorstore, file_path):
 # === ОСНОВНАЯ ЦЕПОЧКА ===
 def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embeddinggemma:latest", folder_path=None):
     global llm
-    llm = ChatOllama(model=model_name, num_gpu=1 if use_gpu else 0, temperature=0.1)
+    llm = None
+    ollama_ok = _ollama_available()
+    if ollama_ok:
+        try:
+            try:
+                llm = ChatOllama(model=model_name, num_gpu=1 if use_gpu else 0, temperature=0.1,
+                                 base_url="http://127.0.0.1:11434", keep_alive="5m", timeout=60)
+            except TypeError:
+                llm = ChatOllama(model=model_name, num_gpu=1 if use_gpu else 0, temperature=0.1,
+                                 base_url="http://127.0.0.1:11434")
+        except Exception as e:
+            llm = None
 
     prompt = ChatPromptTemplate.from_template(
         """Ты — точный ассистент. Отвечай ТОЛЬКО на основе контекста.
@@ -213,7 +243,28 @@ def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embedd
         ]
 
         context = format_context_with_sources(final_docs, query)
-        answer = llm.invoke(prompt.format(context=context, input=query)).content.strip()
+        if llm is None:
+            return {
+                "result": (
+                    "Локальный сервер моделей (Ollama) недоступен или модель не инициализирована. "
+                    "Запустите Ollama (ollama serve) и выполните 'ollama pull' для модели: "
+                    f"{model_name}."
+                ),
+                "source_documents": [],
+                "sources": "Нет источников",
+                "keywords": extract_keywords_from_query(query, top_n=7),
+                "formatted_context": ""
+            }
+        try:
+            answer = llm.invoke(prompt.format(context=context, input=query)).content.strip()
+        except Exception as e:
+            return {
+                "result": f"Ошибка при запросе к модели: {e}",
+                "source_documents": [],
+                "sources": "Нет источников",
+                "keywords": extract_keywords_from_query(query, top_n=7),
+                "formatted_context": context[:500] + "..." if len(context) > 500 else context
+            }
 
         sources = {best_file} if best_file else set()
 

@@ -6,7 +6,7 @@ import logging
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_ollama.embeddings import OllamaEmbeddings
 from langchain_community.vectorstores import FAISS
-from src.config import SUPPORTED_FORMATS, EMBEDDING_MODEL
+from config import SUPPORTED_FORMATS, EMBEDDING_MODEL
 import PyPDF2
 from docx import Document as DocxDocument
 import bs4

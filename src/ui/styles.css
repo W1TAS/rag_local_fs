@@ -1,50 +1,19 @@
-QMainWindow, QWidget {
-    background: #000000;
-    color: #E0E0E0;
-}
-
-QLineEdit {
-    background: #1A1A1A;
-    color: #FFFFFF;
-    border: 1px solid #333;
-    border-radius: 20px;
-    padding: 12px 20px;
-    font-size: 14px;
-}
-QLineEdit:focus { border: 1px solid #1DA1F2; }
-
-QPushButton {
-    background: #1DA1F2;
-    color: white;
-    border: none;
-    border-radius: 20px;
-    padding: 12px 24px;
-    font-weight: bold;
-}
-QPushButton:hover { background: #1991DB; }
-
-QLabel { background: transparent; }
-
-.user-message {
-    background: #1DA1F2;
-    color: white;
-    padding: 12px 18px;
-    border-radius: 18px;
-    font-size: 14px;
-    margin: 4px 12px;
-}
-.assistant-message {
-    background: #2A2A2A;
-    color: #E0E0E0;
-    padding: 12px 18px;
-    border-radius: 18px;
-    font-size: 14px;
-    margin: 4px 12px;
-}
-.typing {
-    font-style: italic;
-    color: #888;
-    margin: 4px 12px;
-}
-
-.message-widget { opacity: 0; }
+/* HTML-only CSS used inside QTextBrowser */
+.chat-container { padding: 16px 0 8px 0; }
+.row { margin: 10px 16px; }
+.row.user { margin-left: 16px; }
+.row.assistant { margin-right: 16px; }
+.avatar { width: 28px; height: 28px; border-radius: 50%; background: #262626; color: #9e9e9e; display: block; float: left; text-align: center; line-height: 28px; font-size: 12px; margin-right: 8px; }
+.row.user .avatar { display: none; }
+.bubble { max-width: 74%; display: block; border-radius: 18px; padding: 14px 16px; line-height: 1.55; box-shadow: 0 4px 14px rgba(0,0,0,0.35); }
+.row.user .bubble { float: right; }
+.row.assistant .bubble { float: left; }
+.user-message { background: #1DA1F2; color: #fff; border: 1px solid rgba(13, 110, 253, 0.35); border-top-right-radius: 8px; }
+.assistant-message { background: #1a1a1a; color: #E0E0E0; border: 1px solid #262626; border-top-left-radius: 8px; }
+.source { background: #111; color: #bbb; border: 1px solid #222; }
+.meta { font-size: 11px; color: #8a8a8a; margin-top: 6px; }
+.typing { font-style: italic; color: #9a9a9a; }
+.bubble a { color: #7cc4ff; text-decoration: none; }
+.bubble a:hover { text-decoration: underline; }
+.bubble code { background: #111; padding: 1px 6px; border-radius: 6px; }
+.bubble pre, .bubble pre code { background: #0f0f0f; border: 1px solid #1e1e1e; border-radius: 8px; padding: 12px; overflow-x: auto; }

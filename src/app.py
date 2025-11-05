@@ -2,7 +2,7 @@
 import sys
 import os
 from PySide6.QtWidgets import QApplication
-from src.ui.main_window import MainWindow
+from ui.main_window import MainWindow
 
 def main():
     if len(sys.argv) < 2:
@@ -16,11 +16,11 @@ def main():
 
     app = QApplication(sys.argv)
     app.main_window = MainWindow(folder_path)
+    # Ensure proper cleanup on quit
+    app.aboutToQuit.connect(lambda: app.main_window.coordinator.close())
     app.main_window.show()
     code = app.exec()
-    app.main_window.coordinator.close()  # <--- Добавь!
     sys.exit(code)
-    sys.exit(app.exec())
     
 if __name__ == "__main__":
     main()
