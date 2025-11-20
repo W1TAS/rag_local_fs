@@ -7,6 +7,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_ollama.embeddings import OllamaEmbeddings
 from langchain_community.vectorstores import FAISS
 from config import SUPPORTED_FORMATS, EMBEDDING_MODEL
+from cache import get_folder_cache_dir
 import PyPDF2
 from docx import Document as DocxDocument
 import bs4
@@ -66,8 +67,10 @@ def extract_text(file_path):
 
 # src/indexer.py
 def build_index(folder_path, embedding_model):
-    index_path = "faiss_index"
-    timestamp_path = "file_timestamps.pkl"
+    # Store index and metadata in centralized per-folder cache directory
+    cache_dir = get_folder_cache_dir(folder_path)
+    index_path = os.path.join(cache_dir, "faiss_index")
+    timestamp_path = os.path.join(cache_dir, "file_timestamps.pkl")
 
     # === 1. Сбор файлов ===
     print(f"[INDEXER] Сканирование папки: {folder_path}")
@@ -148,7 +151,7 @@ def build_index(folder_path, embedding_model):
     )
 
     # === 6. Сохранение ===
-    print("[INDEXER] Сохранение индекса...")
+    print("[INDEXER] Сохранение индекса в:", index_path)
     vectorstore.save_local(index_path)
     with open(timestamp_path, "wb") as f:
         pickle.dump(current_timestamps, f)

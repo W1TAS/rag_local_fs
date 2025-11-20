@@ -46,9 +46,20 @@ def _ollama_available():
         return False
 
 def summarize_all_in_one(vectorstore, model_name, use_gpu=True, folder_path=None):
+    # Store summary caches in per-folder cache directory to avoid polluting the
+    # indexed folder with temporary files.
     cache_file = "summary_cache.pkl"
     hash_file = "summary_hash.txt"
     current_hash = get_folder_hash(folder_path) if folder_path else ""
+    if folder_path:
+        try:
+            from cache import get_folder_cache_dir
+            folder_cache = get_folder_cache_dir(folder_path)
+            cache_file = os.path.join(folder_cache, cache_file)
+            hash_file = os.path.join(folder_cache, hash_file)
+        except Exception:
+            # fallback to cwd
+            pass
 
     if folder_path and os.path.exists(cache_file) and os.path.exists(hash_file):
         with open(hash_file, "r", encoding="utf-8") as f:
