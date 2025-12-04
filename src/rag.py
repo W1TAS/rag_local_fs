@@ -193,7 +193,7 @@ def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embedd
             llm = None
 
     prompt = ChatPromptTemplate.from_template(
-        """Ты — точный ассистент. Отвечай ТОЛЬКО на основе контекста.
+        """Ты — точный ассистент. Отвечай ТОЛЬКО на основе контекста. Отвечай ТОЛЬКО НА РУССКОМ ЯЗЫКЕ.
 Если информации нет — скажи "Информация отсутствует в доступных документах".
 
 Контекст:
