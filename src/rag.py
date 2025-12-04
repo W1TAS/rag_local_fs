@@ -8,7 +8,36 @@ import numpy as np
 import requests
 from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
+# В самом верху rag.py добавь импорт, если ещё нет
 from config import SUPPORTED_FORMATS
+from typing import Optional
+
+def _extract_file_from_query(query: str, folder_path: str) -> Optional[str]:
+    """Ищет в запросе имя файла и возвращает полный путь, если файл существует."""
+    if not folder_path:
+        return None
+
+    query_low = query.lower()
+
+    # 1. Файл в кавычках
+    import re
+    m = re.search(r'[«"\'“”]([^«"\'“”]+\.(?:' + '|'.join(SUPPORTED_FORMATS) + r'))[«"\'“”]', query_low)
+    if m:
+        name = m.group(1)
+    else:
+        # 2. Паттерн "в файле имя.pdf", "про файл имя.docx" и т.д.
+        m = re.search(r'(?:в|по|из|про)\s+(?:файл[ае]?|документ[ае]?)\s+["\']?([^\s"\'.,;]+(?:\.(?:' + '|'.join(SUPPORTED_FORMATS) + r')))', query_low)
+        if m:
+            name = m.group(1)
+        else:
+            return None
+
+    # Ищем точное совпадение среди реальных файлов
+    for root, _, files in os.walk(folder_path):
+        for f in files:
+            if f.lower() == name.lower():
+                return os.path.join(root, f)
+    return None
 
 # === СТОП-СЛОВА ===
 RUSSIAN_STOP_WORDS = {
@@ -193,8 +222,7 @@ def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embedd
             llm = None
 
     prompt = ChatPromptTemplate.from_template(
-        """Ты — точный ассистент. Отвечай ТОЛЬКО на основе контекста. Отвечай ТОЛЬКО НА РУССКОМ ЯЗЫКЕ.
-Если информации нет — скажи "Информация отсутствует в доступных документах".
+        """Отвечай на русском языке МАКСИМАЛЬНО КРАТКО: 5 предложений максимум, не более 100 слов всего. Без смайликов и форматирования текста.     
 
 Контекст:
 {context}
@@ -206,6 +234,14 @@ def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embedd
 
     def wrapped_qa_chain(query, file_filter=None):
         query_lower = query.lower().strip()
+
+        # После строки query_lower = query.lower().strip()
+
+        inferred_file = None
+        if not file_filter and folder_path:  # только если не пришёл извне
+            inferred_file = _extract_file_from_query(query, folder_path)
+
+        effective_file = file_filter or inferred_file
 
         # === ОБЩИЕ ЗАПРОСЫ ===
         general_patterns = [
