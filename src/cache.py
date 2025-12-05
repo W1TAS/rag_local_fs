@@ -52,3 +52,40 @@ def clear_folder_cache(folder_path: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def prepare_virtual_folder_for_file(file_path: str) -> str:
+    """Create a virtual indexing folder and copy the target file into it.
+
+    This allows single-file indexing without scanning the entire parent folder.
+    Returns the path to the virtual folder.
+
+    Args:
+        file_path: absolute path to the file to index
+
+    Returns:
+        path to the temporary virtual folder containing the copied file
+    """
+    import shutil
+
+    if not os.path.isfile(file_path):
+        raise ValueError(f"Not a file: {file_path}")
+
+    file_path = os.path.abspath(file_path)
+    cache_root = get_cache_root()
+    file_hash = hashlib.sha256(file_path.encode('utf-8')).hexdigest()[:12]
+    file_name = os.path.basename(file_path)
+    virtual_folder = os.path.join(cache_root, f"_singlefile_{file_hash}")
+    os.makedirs(virtual_folder, exist_ok=True)
+
+    # Copy the file into the virtual folder (or hardlink if on same filesystem)
+    dest = os.path.join(virtual_folder, file_name)
+    try:
+        # Try hardlink first (faster, no disk space used)
+        os.link(file_path, dest) if not os.path.exists(dest) else None
+    except (OSError, FileExistsError):
+        # Fallback to copy if hardlink fails
+        if not os.path.exists(dest):
+            shutil.copy2(file_path, dest)
+
+    return virtual_folder

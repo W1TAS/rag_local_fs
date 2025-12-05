@@ -415,7 +415,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ts = datetime.now().strftime("%H:%M")
         content = text
         if is_source:
-            content = f"Источник: {text}"
+            content = f"{text}"
 
         if hasattr(self, 'conversations'):
             self.conversations[chat_idx].append((content, is_user, ts))
