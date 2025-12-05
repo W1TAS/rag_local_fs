@@ -1,4 +1,3 @@
-# rag.py — ПОЛНЫЙ, С ВЫВОДОМ ВСЕГО ТЕКСТА ИЗ ФАЙЛА
 import os
 import re
 import pickle
@@ -8,7 +7,6 @@ import numpy as np
 import requests
 from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
-# В самом верху rag.py добавь импорт, если ещё нет
 from config import SUPPORTED_FORMATS
 from typing import Optional
 
@@ -75,8 +73,6 @@ def _ollama_available():
         return False
 
 def summarize_all_in_one(vectorstore, model_name, use_gpu=True, folder_path=None):
-    # Store summary caches in per-folder cache directory to avoid polluting the
-    # indexed folder with temporary files.
     cache_file = "summary_cache.pkl"
     hash_file = "summary_hash.txt"
     current_hash = get_folder_hash(folder_path) if folder_path else ""
@@ -87,7 +83,6 @@ def summarize_all_in_one(vectorstore, model_name, use_gpu=True, folder_path=None
             cache_file = os.path.join(folder_cache, cache_file)
             hash_file = os.path.join(folder_cache, hash_file)
         except Exception:
-            # fallback to cwd
             pass
 
     if folder_path and os.path.exists(cache_file) and os.path.exists(hash_file):
@@ -104,7 +99,6 @@ def summarize_all_in_one(vectorstore, model_name, use_gpu=True, folder_path=None
             llm = ChatOllama(model=model_name, num_gpu=1 if use_gpu else 0, temperature=0.1,
                              base_url="http://127.0.0.1:11434", keep_alive="5m", timeout=60)
         except TypeError:
-            # Fallback for older client without keep_alive/timeout
             llm = ChatOllama(model=model_name, num_gpu=1 if use_gpu else 0, temperature=0.1,
                              base_url="http://127.0.0.1:11434")
     except Exception as e:
@@ -235,10 +229,8 @@ def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embedd
     def wrapped_qa_chain(query, file_filter=None):
         query_lower = query.lower().strip()
 
-        # После строки query_lower = query.lower().strip()
-
         inferred_file = None
-        if not file_filter and folder_path:  # только если не пришёл извне
+        if not file_filter and folder_path: 
             inferred_file = _extract_file_from_query(query, folder_path)
 
         effective_file = file_filter or inferred_file

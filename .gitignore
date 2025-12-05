@@ -12,6 +12,7 @@ dist/
 
 # Виртуальные окружения
 .venv/
+.vscode/
 venv/
 .env
 .idea/

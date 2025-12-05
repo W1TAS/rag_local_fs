@@ -1,6 +1,9 @@
 # src/app.py
 import sys
 import os
+import logging
+from logging.handlers import RotatingFileHandler
+from cache import get_cache_root
 from PySide6.QtWidgets import QApplication
 from ui.main_window import MainWindow
 
@@ -40,6 +43,34 @@ def main():
         elif arg in ("--ask", "ask"):
             initial_mode = "ask"
 
+    # Configure logging early so modules can log to file
+    try:
+        log_dir = get_cache_root()
+        log_path = os.path.join(log_dir, "app.log")
+        handler = RotatingFileHandler(log_path, maxBytes=5 * 1024 * 1024, backupCount=3, encoding='utf-8')
+        fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        handler.setFormatter(fmt)
+        root_logger = logging.getLogger()
+        root_logger.setLevel(logging.INFO)
+        root_logger.addHandler(handler)
+
+        # Redirect stdout/stderr to logger so prints are captured
+        class StreamToLogger:
+            def __init__(self, logger, level=logging.INFO):
+                self.logger = logger
+                self.level = level
+            def write(self, buf):
+                for line in buf.rstrip().splitlines():
+                    self.logger.log(self.level, line)
+            def flush(self):
+                pass
+
+        sys.stdout = StreamToLogger(logging.getLogger("STDOUT"), logging.INFO)
+        sys.stderr = StreamToLogger(logging.getLogger("STDERR"), logging.ERROR)
+        logging.info("RAG Assistant starting")
+    except Exception:
+        pass
+
     app = QApplication(sys.argv)
     app.main_window = MainWindow(folder_path)
 
@@ -61,7 +92,7 @@ def main():
                     app.main_window.input_field.setFocus()
                     if initial_file_filter:
                         # Optionally pre-fill clarification to user indicating file is targeted
-                        app.main_window.input_field.setPlainText(f"Вопрос про файл: {os.path.basename(initial_file_filter)}\n")
+                        app.main_window.input_field.setPlainText(f"Вопрос про файл {os.path.basename(initial_file_filter)}:\n")
                 # disconnect after first call
                 try:
                     coord.indexing_finished.disconnect(_on_index_ready)

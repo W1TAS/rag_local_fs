@@ -4,8 +4,9 @@ import shutil
 from datetime import datetime
 from PySide6 import QtWidgets, QtCore, QtGui
 from coordinator import RAGCoordinator
-from cache import get_folder_cache_dir
+from cache import get_folder_cache_dir, clear_folder_cache
 from ui.tray import create_tray_icon
+from ui.log_window import LogWindow
 from ui.chat_widgets import ChatMessageWidget, add_message_item
 from ui.chat_model import ChatListModel, ChatMessage
 from ui.chat_delegate import ChatItemDelegate
@@ -54,6 +55,7 @@ class MainWindow(QtWidgets.QMainWindow):
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
+        # Sidebar container: list + footer buttons
         self.sidebar = QtWidgets.QListWidget()
         self.sidebar.setFixedWidth(240)
         self.sidebar.addItem("Новый чат")
@@ -63,6 +65,59 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sidebar.customContextMenuRequested.connect(self._on_sidebar_context_menu)
         self.sidebar.setFocusPolicy(QtCore.Qt.NoFocus)
         self.sidebar.itemClicked.connect(self.on_sidebar_click)
+
+        self.sidebar_container = QtWidgets.QWidget()
+        self.sidebar_container.setFixedWidth(240)
+        # ensure sidebar container background matches the sidebar
+        self.sidebar_container.setStyleSheet("background: #0e0e0e;")
+        sidebar_layout = QtWidgets.QVBoxLayout(self.sidebar_container)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.setSpacing(6)
+        sidebar_layout.addWidget(self.sidebar)
+
+        # Footer with utility buttons
+        footer = QtWidgets.QWidget()
+        footer.setStyleSheet("background: #0e0e0e;")  # Match sidebar background
+        footer_layout = QtWidgets.QHBoxLayout(footer)
+        # reduce top margin to avoid visible gap between list and footer
+        footer_layout.setContentsMargins(6, 4, 6, 8)
+        footer_layout.setSpacing(8)
+        # Logs button (left) and Clear Cache (right)
+        self.logs_btn = QtWidgets.QPushButton("Логи")
+        self.logs_btn.setMinimumHeight(34)
+        self.logs_btn.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Minimum)
+        self.logs_btn.setStyleSheet(
+            "QPushButton { background: transparent; color: #cfcfcf; border: none; padding: 6px 10px; }"
+            "QPushButton:hover { color: white; }"
+        )
+        self.logs_btn.clicked.connect(self.open_logs)
+        footer_layout.addWidget(self.logs_btn)
+
+        footer_layout.addStretch()
+
+        self.clear_cache_btn = QtWidgets.QPushButton("Очистить кеш")
+        self.clear_cache_btn.setMinimumHeight(40)
+        self.clear_cache_btn.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Minimum)
+        # reapply gradient style explicitly so button keeps the primary look
+        self.clear_cache_btn.setStyleSheet(
+            "QPushButton {"
+            "  background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #34b0ff, stop:1 #1a8cd8);"
+            "  color: white; border: 1px solid #106ea9; border-radius: 14px;"
+            "  padding: 10px 18px; font-weight: 600;"
+            "}"
+            "QPushButton:hover {"
+            "  background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #4ec0ff, stop:1 #2298e6);"
+            "}"
+            "QPushButton:pressed { background: #1579c2; }"
+        )
+        self.clear_cache_btn.clicked.connect(self.on_clear_cache)
+        footer_layout.addWidget(self.clear_cache_btn)
+
+        # Disable until folder selected
+        if not self.folder_path:
+            self.clear_cache_btn.setEnabled(False)
+
+        sidebar_layout.addWidget(footer)
 
         main_container = QtWidgets.QWidget()
         main_layout = QtWidgets.QVBoxLayout(main_container)
@@ -126,7 +181,7 @@ class MainWindow(QtWidgets.QMainWindow):
         main_layout.addWidget(self.chat_list, 1)
         main_layout.addWidget(composer)
 
-        root_layout.addWidget(self.sidebar)
+        root_layout.addWidget(self.sidebar_container)
         root_layout.addWidget(main_container, 1)
 
         # Load stylesheet relative to this file so app works regardless of CWD
@@ -198,12 +253,68 @@ class MainWindow(QtWidgets.QMainWindow):
         self.send_btn.setEnabled(True)
         self.input_field.setEnabled(True)
         self.reindex_btn.setEnabled(True)
+        self.clear_cache_btn.setEnabled(True)
+        # Logs button always enabled (app-level)
+        try:
+            self.logs_btn.setEnabled(True)
+        except Exception:
+            pass
 
     def _ensure_coordinator(self):
         if self.coordinator is None:
             QtWidgets.QMessageBox.information(self, "Папка не выбрана", "Сначала выберите папку для индексации.")
             self.select_folder_dialog()
         return self.coordinator is not None
+
+
+    def on_clear_cache(self):
+        if not self.folder_path:
+            QtWidgets.QMessageBox.information(self, "Кеш не выбран", "Сначала выберите папку.")
+            return
+        reply = QtWidgets.QMessageBox.question(
+            self, "Удалить кеш?",
+            f"Удалить кеш для папки:\n{self.folder_path}?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+        )
+        if reply != QtWidgets.QMessageBox.Yes:
+            return
+
+        success = False
+        try:
+            success = clear_folder_cache(self.folder_path)
+        except Exception:
+            success = False
+
+        if success:
+            QtWidgets.QMessageBox.information(self, "Кеш удалён", "Кеш успешно удалён.")
+            # Offer reindex
+            if QtWidgets.QMessageBox.question(self, "Переиндексировать?", "Переиндексировать сейчас эту папку?", QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No) == QtWidgets.QMessageBox.Yes:
+                if self.coordinator is None:
+                    try:
+                        if RAGCoordinator._instance is not None:
+                            try:
+                                RAGCoordinator._instance.close()
+                            except Exception:
+                                pass
+                            RAGCoordinator._instance = None
+                        self.coordinator = RAGCoordinator.instance(self.folder_path)
+                        self._connect_signals()
+                    except Exception:
+                        pass
+                if self.coordinator:
+                    self.add_message("Переиндексация начата…")
+                    self.coordinator.start_indexing()
+        else:
+            QtWidgets.QMessageBox.warning(self, "Ошибка", "Не удалось удалить кеш. Проверьте права и повторите.")
+
+    def open_logs(self):
+        try:
+            from cache import get_cache_root
+            log_path = os.path.join(get_cache_root(), "app.log")
+            win = LogWindow(self, log_path=log_path)
+            win.exec()
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Ошибка", f"Не удалось открыть логи: {e}")
 
     def _on_sidebar_context_menu(self, pos):
         item = self.sidebar.itemAt(pos)
