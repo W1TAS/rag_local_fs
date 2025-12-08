@@ -2,10 +2,9 @@ from PySide6 import QtWidgets, QtCore, QtGui
 
 
 class ChatMessageWidget(QtWidgets.QWidget):
-    """A robust bubble widget with dynamic height to avoid cropping/lag."""
 
     SIDE_PADDING = 12
-    AVATAR_SPACE = 28 + 8  # avatar width + spacing
+    AVATAR_SPACE = 28 + 8
     BUBBLE_MAX_RATIO = 0.68
 
     def __init__(self, text: str, is_user: bool, timestamp: str):
@@ -54,7 +53,6 @@ class ChatMessageWidget(QtWidgets.QWidget):
         self.setLayout(layout)
         self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Minimum)
 
-    # --- Layout/size computation helpers ---
     def _available_width(self, parent_width: int) -> int:
         available = int(parent_width * self.BUBBLE_MAX_RATIO)
         if not self._is_user:
@@ -63,12 +61,11 @@ class ChatMessageWidget(QtWidgets.QWidget):
 
     def reflow(self, parent_width: int):
         maxw = self._available_width(parent_width)
-        # Adjust text document width and resulting height
         doc = self.content.document()
         doc.setTextWidth(maxw - 28)
         doc.adjustSize()
         text_h = int(doc.size().height())
-        self.content.setFixedWidth(maxw - 4)  # a little extra to avoid wrap jitter
+        self.content.setFixedWidth(maxw - 4)
         self.content.setFixedHeight(text_h + 4)
         self.bubble.setMaximumWidth(maxw)
 
@@ -92,13 +89,12 @@ class ChatMessageWidget(QtWidgets.QWidget):
         doc.setTextWidth(max(100, maxw - 28))
         text_height = int(doc.size().height())
         meta_height = self.meta.sizeHint().height()
-        bubble_vert = 10 + 10  # bubble paddings
-        outer_vert = 6 + 6  # container margins
+        bubble_vert = 10 + 10 
+        outer_vert = 6 + 6
         height = text_height + meta_height + bubble_vert + outer_vert + 4
         return QtCore.QSize(width, max(40, height))
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
-        # Constrain bubble width on parent resize to keep wrapping stable
         parent = self.parent()
         if parent and hasattr(parent, 'viewport'):
             width = parent.viewport().width()

@@ -8,7 +8,7 @@ class ChatMessage:
     text: str
     isUser: bool
     timestamp: str
-    kind: str = "message"  # message | typing | system
+    kind: str = "message"
 
 
 class ChatListModel(QtCore.QAbstractListModel):
@@ -52,7 +52,6 @@ class ChatListModel(QtCore.QAbstractListModel):
         self.endInsertRows()
 
     def removeTyping(self):
-        # remove last typing item if present
         if self._messages and self._messages[-1].kind == "typing":
             last = len(self._messages) - 1
             self.beginRemoveRows(QtCore.QModelIndex(), last, last)

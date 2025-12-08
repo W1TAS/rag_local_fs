@@ -1,6 +1,4 @@
-# indexer.py
 import os
-import time
 import pickle
 import logging
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -65,9 +63,7 @@ def extract_text(file_path):
 
     return ""
 
-# src/indexer.py
 def build_index(folder_path, embedding_model):
-    # Store index and metadata in centralized per-folder cache directory
     cache_dir = get_folder_cache_dir(folder_path)
     index_path = os.path.join(cache_dir, "faiss_index")
     timestamp_path = os.path.join(cache_dir, "file_timestamps.pkl")

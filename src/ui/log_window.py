@@ -43,10 +43,8 @@ class LogWindow(QtWidgets.QDialog):
             if not os.path.exists(self.log_path):
                 self.text.setPlainText("Лог файл не найден: %s" % self.log_path)
                 return
-            # read last N bytes/lines to avoid huge loads
             with open(self.log_path, "r", encoding="utf-8", errors="replace") as f:
                 data = f.read()
-            # keep last ~2000 lines
             lines = data.splitlines()
             if len(lines) > 2000:
                 lines = lines[-2000:]
@@ -67,16 +65,13 @@ class LogWindow(QtWidgets.QDialog):
         folder = os.path.dirname(self.log_path)
         try:
             if not os.path.exists(folder):
-                # Try to create the folder so explorer can open it
                 os.makedirs(folder, exist_ok=True)
-            # On Windows prefer os.startfile to open Explorer reliably
             if os.name == 'nt':
                 try:
                     os.startfile(folder)
                     return
                 except Exception:
                     pass
-            # Fallback to Qt method
             QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(folder))
         except Exception as e:
             QtWidgets.QMessageBox.information(self, "Не найдено", f"{folder}\nОшибка: {e}")

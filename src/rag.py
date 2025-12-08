@@ -72,7 +72,7 @@ def _ollama_available():
     except Exception:
         return False
 
-def summarize_all_in_one(vectorstore, model_name, use_gpu=True, folder_path=None):
+def summarize_all_in_one(vectorstore, model_name, use_gpu=True, folder_path=None, file_filter=None):
     cache_file = "summary_cache.pkl"
     hash_file = "summary_hash.txt"
     current_hash = get_folder_hash(folder_path) if folder_path else ""
@@ -107,6 +107,10 @@ def summarize_all_in_one(vectorstore, model_name, use_gpu=True, folder_path=None
     previews = []
     for doc in vectorstore.docstore._dict.values():
         source = doc.metadata.get("source")
+        # If file_filter provided, only include that file's docs
+        if file_filter:
+            if source != file_filter:
+                continue
         if source and source not in seen:
             seen.add(source)
             text = doc.page_content[:600]
@@ -116,12 +120,13 @@ def summarize_all_in_one(vectorstore, model_name, use_gpu=True, folder_path=None
 
     prompt = ChatPromptTemplate.from_template(
         """Ты — эксперт по кратким описаниям. 
-        Прочитай фрагменты из файлов ниже. Для КАЖДОГО файла дай описание в 2 предложения.
-
-        Формат ответа:
-        - имя_файла: Краткое описание.
-        - имя_файла: Краткое описание.
-        ...
+        Прочитай фрагменты из файлов ниже. Для КАЖДОГО файла дай описание в не менее чем 2 предложения.
+    
+    ПРИМЕР ТВОЕГО ОТВЕТА (В ТВОЕМ ОТВЕТЕ НЕ ОБЯЗАТЕЛЬНО БУДЕТ ДВА ФАЙЛА, МОЖЕТ БЫТЬ 1 ИЛИ БОЛЬШЕ. ОТВЕЧАЙ ЧЕТКО ПО ФАЙЛАМ В БАЗЕ ДАННЫХ)
+        Формат ответа :
+        - [имя_файла_1]:[краткое описание].
+        - [имя_файла_2]:[краткое описание].
+        и так далее...
         
         Файлы:
         {context}
@@ -133,10 +138,13 @@ def summarize_all_in_one(vectorstore, model_name, use_gpu=True, folder_path=None
         response = llm.invoke(prompt.format(context=context))
         result = response.content.strip()
         if folder_path:
-            with open(cache_file, "wb") as f:
-                pickle.dump(result, f)
-            with open(hash_file, "w", encoding="utf-8") as f:
-                f.write(current_hash)
+            try:
+                with open(cache_file, "wb") as f:
+                    pickle.dump(result, f)
+                with open(hash_file, "w", encoding="utf-8") as f:
+                    f.write(current_hash)
+            except Exception:
+                pass
         return result
     except Exception as e:
         return f"Ошибка суммирования: {e}"
@@ -236,16 +244,17 @@ def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embedd
 
         effective_file = file_filter or inferred_file
 
-        # === ОБЩИЕ ЗАПРОСЫ ===
+        # === ОБЩИЕ ЗАПРОСЫ (О ЧЕМ ФАЙЛЫ) ===
         general_patterns = [
             "о чём файлы", "что в файлах", "опиши файлы",
             "о чем файлы", "о чём эти файлы", "о чём все файлы",
             "что в этих файлах", "опиши содержимое", "о чём документы"
         ]
         if any(p in query_lower for p in general_patterns):
+            # Generate summary for all files (works for real folders and virtual single-file folders)
             summary = summarize_all_in_one(vectorstore, model_name, use_gpu, folder_path=folder_path)
             return {
-                "result": f"Краткое описание файлов:\n{summary}",
+                "result": summary,
                 "source_documents": [],
                 "sources": "все файлы",
                 "keywords": [],

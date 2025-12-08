@@ -1,4 +1,5 @@
-# config.py
-MODEL_NAME = "qwen3:4b-instruct-2507-q4_K_M"
+# import os
+
+MODEL_NAME = "gemma3:4b"
 EMBEDDING_MODEL = "embeddinggemma:latest"
-SUPPORTED_FORMATS = ["pdf", "txt", "docx", "html", "md", "png", "jpg", "jpeg"]  # Добавили изображения
+SUPPORTED_FORMATS = ["pdf", "txt", "docx", "html", "md", "png", "jpg", "jpeg"]

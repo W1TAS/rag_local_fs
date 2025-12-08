@@ -1,5 +1,3 @@
-# src/coordinator.py
-import os
 import psutil
 import traceback
 from typing import Optional, Dict, Any, Callable
@@ -148,12 +146,9 @@ class RAGCoordinator(QObject):
         self.threadpool.start(runnable)
 
     def close(self):
-        """Gracefully release resources on application shutdown."""
         try:
-            # Mark as closing to let future tasks no-op
             self.closing = True
             self.is_indexing = False
-            # Best-effort: clear refs to allow GC
             self.active_runnables = []
             self.qa_chain = None
             self.vectorstore = None
@@ -162,7 +157,6 @@ class RAGCoordinator(QObject):
             except Exception:
                 pass
             try:
-                # Wait briefly for running tasks to finish
                 self.threadpool.waitForDone(1000)
             except Exception:
                 pass

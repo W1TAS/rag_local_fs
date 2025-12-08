@@ -55,6 +55,13 @@ def install():
                 pass
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
     app_py = os.path.join(repo_root, 'src', 'app.py')
+    # Try both rag_local_fs/assets/icons and parent repo assets/icons
+    icons_dir_candidates = [
+        os.path.join(repo_root, 'assets', 'icons'),
+        os.path.join(repo_root, '..', 'assets', 'icons'),
+    ]
+    icons_dir = next((p for p in icons_dir_candidates if os.path.isdir(p)), icons_dir_candidates[0])
+    context_icon = os.path.join(icons_dir, 'context_icon.ico')
 
     if not os.path.exists(app_py):
         print("Не найден файл приложения:", app_py)
@@ -71,8 +78,14 @@ def install():
         k = _create_key(hkcu, tell_key_path)
         if k:
             winreg.SetValueEx(k, None, 0, winreg.REG_SZ, APP_LABEL_TELL)
-            # set icon (optional) - reuse python icon
-            winreg.SetValueEx(k, 'Icon', 0, winreg.REG_SZ, python_exe)
+            # set icon (optional) - prefer custom icon in assets/icons
+            try:
+                if os.path.exists(context_icon):
+                    winreg.SetValueEx(k, 'Icon', 0, winreg.REG_SZ, context_icon)
+                else:
+                    winreg.SetValueEx(k, 'Icon', 0, winreg.REG_SZ, python_exe)
+            except Exception:
+                pass
             winreg.CloseKey(k)
             cmd_k = _create_key(hkcu, tell_key_path + '\\command')
             if cmd_k:
@@ -85,12 +98,18 @@ def install():
         k = _create_key(hkcu, ask_key_path)
         if k:
             winreg.SetValueEx(k, None, 0, winreg.REG_SZ, APP_LABEL_ASK)
-            winreg.SetValueEx(k, 'Icon', 0, winreg.REG_SZ, python_exe)
+            try:
+                if os.path.exists(context_icon):
+                    winreg.SetValueEx(k, 'Icon', 0, winreg.REG_SZ, context_icon)
+                else:
+                    winreg.SetValueEx(k, 'Icon', 0, winreg.REG_SZ, python_exe)
+            except Exception:
+                pass
             winreg.CloseKey(k)
-            cmd_k = _create_key(hkcu, ask_key_path + '\\command')
-            if cmd_k:
-                winreg.SetValueEx(cmd_k, None, 0, winreg.REG_SZ, cmd_ask)
-                winreg.CloseKey(cmd_k)
+        cmd_k = _create_key(hkcu, ask_key_path + '\\command')
+        if cmd_k:
+            winreg.SetValueEx(cmd_k, None, 0, winreg.REG_SZ, cmd_ask)
+            winreg.CloseKey(cmd_k)
 
     print("Контекстные пункты установлены (в HKCU). Перезапустите Проводник при необходимости.")
 
