@@ -96,10 +96,10 @@ def summarize_all_in_one(vectorstore, model_name, use_gpu=True, folder_path=None
         return "Локальный сервер моделей (Ollama) недоступен. Запустите 'ollama serve' и выполните 'ollama pull' для нужных моделей."
     try:
         try:
-            llm = ChatOllama(model=model_name, num_gpu=1 if use_gpu else 0, temperature=0.1,
+            llm = ChatOllama(model=model_name, num_gpu=-1 if use_gpu else 0, temperature=0.1,
                              base_url="http://127.0.0.1:11434", keep_alive="5m", timeout=60)
         except TypeError:
-            llm = ChatOllama(model=model_name, num_gpu=1 if use_gpu else 0, temperature=0.1,
+            llm = ChatOllama(model=model_name, num_gpu=-1 if use_gpu else 0, temperature=0.1,
                              base_url="http://127.0.0.1:11434")
     except Exception as e:
         return f"Ошибка инициализации модели: {e}"
@@ -216,16 +216,16 @@ def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embedd
     if ollama_ok:
         try:
             try:
-                llm = ChatOllama(model=model_name, num_gpu=1 if use_gpu else 0, temperature=0.1,
+                llm = ChatOllama(model=model_name, num_gpu=-1 if use_gpu else 0, temperature=0.1,
                                  base_url="http://127.0.0.1:11434", keep_alive="5m", timeout=60)
             except TypeError:
-                llm = ChatOllama(model=model_name, num_gpu=1 if use_gpu else 0, temperature=0.1,
+                llm = ChatOllama(model=model_name, num_gpu=-1 if use_gpu else 0, temperature=0.1,
                                  base_url="http://127.0.0.1:11434")
         except Exception as e:
             llm = None
 
     prompt = ChatPromptTemplate.from_template(
-        """Отвечай на русском языке МАКСИМАЛЬНО КРАТКО: 5 предложений максимум, не более 100 слов всего. Без смайликов и форматирования текста.     
+        """Отвечай на русском языке и строго на предоставленный вопрос. Используй только предоставленный тебе контекст.    
 
 Контекст:
 {context}
@@ -239,7 +239,7 @@ def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embedd
         query_lower = query.lower().strip()
 
         inferred_file = None
-        if not file_filter and folder_path: 
+        if not file_filter and folder_path:
             inferred_file = _extract_file_from_query(query, folder_path)
 
         effective_file = file_filter or inferred_file
@@ -262,7 +262,7 @@ def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embedd
             }
 
         # === РЕТРИВЕР ===
-        search_kwargs = {"k": 10}
+        search_kwargs = {"k": 5}
         if file_filter:
             search_kwargs["filter"] = {"source": file_filter}
         retriever = vectorstore.as_retriever(search_kwargs=search_kwargs)
@@ -316,6 +316,32 @@ def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embedd
             }
 
         sources = {best_file} if best_file else set()
+
+        from datetime import datetime
+
+        # Надёжный путь — в папка с приложением или временная папка
+        save_dir = os.path.dirname(os.path.abspath(__file__))  # папка, где лежит rag.py
+        debug_file = os.path.join(save_dir, "ПОСЛЕДНИЕ_ЧАНКИ.txt")
+
+        try:
+            with open(debug_file, "w", encoding="utf-8") as f:
+                f.write(f"Время: {datetime.now():%Y-%m-%d %H:%M:%S}\n")
+                f.write(f"Вопрос: {query}\n")
+                f.write("=" * 100 + "\n\n")
+
+                for i, doc in enumerate(raw_docs, 1):
+                    filename = os.path.basename(doc.metadata.get("source", "неизвестно"))
+                    f.write(f"ЧАНК {i}  ←  {filename}\n")
+                    f.write("—" * 80 + "\n")
+                    f.write(doc.page_content.strip())
+                    f.write("\n\n" + "═" * 80 + "\n\n")
+
+                f.write(f"Всего чанков передано модели: {len(raw_docs)}\n")
+
+            # Дополнительно покажем в приложении, куда сохранили
+            print(f"Чанки сохранены: {debug_file}")
+        except Exception as e:
+            print(f"Не удалось записать чанки: {e}")
 
         return {
             "result": answer,
