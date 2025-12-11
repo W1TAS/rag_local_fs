@@ -96,10 +96,16 @@ def summarize_all_in_one(vectorstore, model_name, use_gpu=True, folder_path=None
         return "Локальный сервер моделей (Ollama) недоступен. Запустите 'ollama serve' и выполните 'ollama pull' для нужных моделей."
     try:
         try:
-            llm = ChatOllama(model=model_name, num_gpu=-1 if use_gpu else 0, temperature=0.1,
-                             base_url="http://127.0.0.1:11434", keep_alive="5m", timeout=60)
+            llm = ChatOllama(model=model_name,
+                             num_gpu=-1 if use_gpu else 0,
+                             temperature=0.1,
+                             base_url="http://127.0.0.1:11434",
+                             keep_alive="5m",
+                             timeout=60)
         except TypeError:
-            llm = ChatOllama(model=model_name, num_gpu=-1 if use_gpu else 0, temperature=0.1,
+            llm = ChatOllama(model=model_name,
+                             num_gpu=-1 if use_gpu else 0,
+                             temperature=0.1,
                              base_url="http://127.0.0.1:11434")
     except Exception as e:
         return f"Ошибка инициализации модели: {e}"
@@ -216,10 +222,16 @@ def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embedd
     if ollama_ok:
         try:
             try:
-                llm = ChatOllama(model=model_name, num_gpu=-1 if use_gpu else 0, temperature=0.1,
-                                 base_url="http://127.0.0.1:11434", keep_alive="5m", timeout=60)
+                llm = ChatOllama(model=model_name,
+                                 num_gpu=-1 if use_gpu else 0,
+                                 temperature=0.1,
+                                 base_url="http://127.0.0.1:11434",
+                                 keep_alive="5m",
+                                 timeout=60)
             except TypeError:
-                llm = ChatOllama(model=model_name, num_gpu=-1 if use_gpu else 0, temperature=0.1,
+                llm = ChatOllama(model=model_name,
+                                 num_gpu=-1 if use_gpu else 0,
+                                 temperature=0.1,
                                  base_url="http://127.0.0.1:11434")
         except Exception as e:
             llm = None
