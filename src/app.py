@@ -46,9 +46,6 @@ def main():
         try:
             logging.info(f"Single-file mode: preparing virtual folder for {initial_file_filter}")
             folder_path = prepare_virtual_folder_for_file(initial_file_filter)
-            # Clear the file filter: virtual folder contains only this file,
-            # so we don't need to filter. This avoids metadata lookup issues
-            # where the file path may change after being moved.
             initial_file_filter = None
         except Exception as e:
             logging.error(f"Failed to prepare virtual folder: {e}")
@@ -98,7 +95,6 @@ def main():
             pass
 
     app = QApplication(sys.argv)
-    # Set application icon (taskbar) from assets/icons if available
     try:
         from PySide6.QtGui import QIcon
         repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))

@@ -15,17 +15,12 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.folder_path = folder_path
         self.coordinator = None
-        self.chat_html = ""
-        self.typing_html = ""
         self.typing_timer = None
         self.typing_states = {}
         self.pending_typing_chat_idx = None
 
         self.setWindowTitle("RAG Assistant")
         self.setGeometry(300, 200, 960, 720)
-        # Load application icon from assets/icons if present
-        # assets may live either in repo_root/assets/icons or in the parent
-        # folder of rag_local_fs (project root). Try both locations.
         repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
         icons_dir_candidates = [
             os.path.join(repo_root, 'assets', 'icons'),
@@ -48,7 +43,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.setWindowIcon(QtGui.QIcon("icon.png"))
             except Exception:
                 pass
-        self.setAcceptDrops(True)
 
         self._setup_ui()
         self._setup_tray()
@@ -440,27 +434,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _scroll_to_bottom(self):
         self.chat_list.scrollToBottom()
-
-    def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls(): e.acceptProposedAction()
-
-    def dropEvent(self, e):
-        for url in e.mimeData().urls():
-            src = url.toLocalFile()
-            if os.path.isfile(src):
-                dst = os.path.join(self.folder_path, os.path.basename(src))
-                if os.path.exists(dst):
-                    reply = QtWidgets.QMessageBox.question(
-                        self, "Заменить?", f"Файл уже есть. Заменить?",
-                        QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
-                    if reply != QtWidgets.QMessageBox.Yes:
-                        continue
-                shutil.copy2(src, dst)
-                self.add_message(f"Добавлен: <code>{os.path.basename(src)}</code>")
-        if self.coordinator:
-            self.coordinator.start_indexing()
-        else:
-            self.select_folder_dialog()
 
     def closeEvent(self, event):
         try:

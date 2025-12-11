@@ -16,7 +16,8 @@ dist/
 venv/
 .env
 .idea/
-assets/test_files
+assets/
+
 models
 # FAISS и кэши
 faiss_index/

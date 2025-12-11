@@ -24,7 +24,7 @@ class ChatListModel(QtCore.QAbstractListModel):
     def rowCount(self, parent=QtCore.QModelIndex()) -> int:
         return 0 if parent.isValid() else len(self._messages)
 
-    def data(self, index: QtCore.QModelIndex, role: int):
+    def data(self, index: QtCore.QModelIndex, role: int): # deprecated
         if not index.isValid():
             return None
         msg = self._messages[index.row()]
@@ -38,7 +38,7 @@ class ChatListModel(QtCore.QAbstractListModel):
             return msg.kind
         return None
 
-    def roleNames(self):
+    def roleNames(self): # deprecated
         return {
             self.TextRole: b"text",
             self.IsUserRole: b"isUser",
