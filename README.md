@@ -85,7 +85,7 @@ python .\scripts\install_context_menu.py uninstall
 
 Все временные файлы и индексы теперь сохраняются централизованно, а не в индексируемой папке. По умолчанию расположение на Windows:
 
-```
+```powershell
 %LOCALAPPDATA%\RAGAssistant\<имя_папки>_<hash16>\
 ```
 

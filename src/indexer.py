@@ -1,3 +1,5 @@
+# src/indexer.py
+import easyocr
 import os
 import pickle
 import logging
@@ -9,17 +11,19 @@ from cache import get_folder_cache_dir
 import PyPDF2
 from docx import Document as DocxDocument
 import bs4
-import easyocr
+
 
 # Глобальный OCR reader
 ocr_reader = None
+
 
 def get_ocr_reader():
     global ocr_reader
     if ocr_reader is None:
         print("Загрузка EasyOCR (один раз, может занять 10-20 сек)...")
-        ocr_reader = easyocr.Reader(['ru', 'en'], gpu=True)
+        ocr_reader = easyocr.Reader(["ru", "en"], gpu=True)
     return ocr_reader
+
 
 def extract_text(file_path):
     ext = os.path.splitext(file_path)[1].lower().lstrip(".")
@@ -63,7 +67,8 @@ def extract_text(file_path):
 
     return ""
 
-def build_index(folder_path, embedding_model):
+
+def build_index(folder_path, embedding_model, progress_callback=None):
     cache_dir = get_folder_cache_dir(folder_path)
     index_path = os.path.join(cache_dir, "faiss_index")
     timestamp_path = os.path.join(cache_dir, "file_timestamps.pkl")
@@ -81,6 +86,7 @@ def build_index(folder_path, embedding_model):
                 supported_files.append(path)
 
     print(f"[INDEXER] Найдено файлов: {len(supported_files)}")
+    total_files = len(supported_files)
 
     # === 2. Проверка кэша ===
     try:
@@ -101,6 +107,8 @@ def build_index(folder_path, embedding_model):
         embeddings = OllamaEmbeddings(model=embedding_model)
         vectorstore = FAISS.load_local(index_path, embeddings, allow_dangerous_deserialization=True)
         print("[INDEXER] Кэш загружен!")
+        if progress_callback:
+            progress_callback(total_files, total_files)
         return vectorstore
 
     print("[INDEXER] Построение нового индекса...")
@@ -113,9 +121,18 @@ def build_index(folder_path, embedding_model):
         text = extract_text(path)
         text.strip()
         texts.append(text)
-        metadatas.append({"source": path, "type": "image" if os.path.splitext(path)[1].lower().lstrip(".") in ["png", "jpg", "jpeg"] else "document"})
+        metadatas.append(
+            {
+                "source": path,
+                "type": "image"
+                if os.path.splitext(path)[1].lower().lstrip(".") in ["png", "jpg", "jpeg"]
+                else "document",
+            }
+        )
+        if progress_callback:
+            progress_callback(i + 1, total_files)
     else:
-        print(f"  → Текст пустой")
+        print("  → Текст пустой")
 
     if not texts:
         print("[INDEXER] Нет текста для индексации")
@@ -140,11 +157,7 @@ def build_index(folder_path, embedding_model):
     print("[INDEXER] Загрузка модели эмбеддингов...")
     embeddings = OllamaEmbeddings(model=embedding_model)
     print("[INDEXER] Создание FAISS...")
-    vectorstore = FAISS.from_texts(
-        texts=split_texts,
-        embedding=embeddings,
-        metadatas=split_metadatas
-    )
+    vectorstore = FAISS.from_texts(texts=split_texts, embedding=embeddings, metadatas=split_metadatas)
 
     # === 6. Сохранение ===
     print("[INDEXER] Сохранение индекса в:", index_path)

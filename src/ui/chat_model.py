@@ -1,6 +1,7 @@
+# src/ui/chat_model.py
 from dataclasses import dataclass
 from typing import List
-from PySide6 import QtCore
+from PyQt6 import QtCore
 
 
 @dataclass
@@ -12,10 +13,10 @@ class ChatMessage:
 
 
 class ChatListModel(QtCore.QAbstractListModel):
-    TextRole = QtCore.Qt.UserRole + 1
-    IsUserRole = QtCore.Qt.UserRole + 2
-    TimestampRole = QtCore.Qt.UserRole + 3
-    KindRole = QtCore.Qt.UserRole + 4
+    TextRole = QtCore.Qt.ItemDataRole.UserRole + 1
+    IsUserRole = QtCore.Qt.ItemDataRole.UserRole + 2
+    TimestampRole = QtCore.Qt.ItemDataRole.UserRole + 3
+    KindRole = QtCore.Qt.ItemDataRole.UserRole + 4
 
     def __init__(self, messages: List[ChatMessage] = None):
         super().__init__()
@@ -24,7 +25,7 @@ class ChatListModel(QtCore.QAbstractListModel):
     def rowCount(self, parent=QtCore.QModelIndex()) -> int:
         return 0 if parent.isValid() else len(self._messages)
 
-    def data(self, index: QtCore.QModelIndex, role: int): # deprecated
+    def data(self, index: QtCore.QModelIndex, role: int):  # deprecated
         if not index.isValid():
             return None
         msg = self._messages[index.row()]
@@ -38,7 +39,7 @@ class ChatListModel(QtCore.QAbstractListModel):
             return msg.kind
         return None
 
-    def roleNames(self): # deprecated
+    def roleNames(self):  # deprecated
         return {
             self.TextRole: b"text",
             self.IsUserRole: b"isUser",
@@ -63,5 +64,3 @@ class ChatListModel(QtCore.QAbstractListModel):
             self._messages[-1].text = "Генерация" + "." * dots
             idx = self.index(len(self._messages) - 1)
             self.dataChanged.emit(idx, idx, [self.TextRole])
-
-

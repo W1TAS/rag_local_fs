@@ -1,18 +1,20 @@
+# src/coordinator.py
 import psutil
 import traceback
 from typing import Optional, Dict, Any, Callable
-from PySide6.QtCore import QObject, Signal, QRunnable, QThreadPool
+from PyQt6.QtCore import QObject, pyqtSignal, QRunnable, QThreadPool
 from indexer import build_index
 from rag import get_rag_chain
 from config import MODEL_NAME, EMBEDDING_MODEL
 
 
 class IndexingSignals(QObject):
-    finished = Signal()
-    error = Signal(str)
+    finished = pyqtSignal()
+    error = pyqtSignal(str)
+
 
 class AskSignals(QObject):
-    result = Signal(dict)
+    result = pyqtSignal(dict)
 
 
 class IndexingRunnable(QRunnable):
@@ -26,27 +28,44 @@ class IndexingRunnable(QRunnable):
         try:
             if getattr(self.coordinator, "closing", False):
                 return
-            vectorstore = build_index(self.coordinator.folder_path, EMBEDDING_MODEL)
+
+            def _progress_callback(current_files: int, total_files: int):
+                try:
+                    percent = int((current_files * 100) / total_files) if total_files else 0
+                    self.coordinator.indexing_progress.emit(current_files, total_files, percent)
+                except Exception:
+                    pass
+
+            vectorstore = build_index(
+                self.coordinator.folder_path,
+                EMBEDDING_MODEL,
+                progress_callback=_progress_callback,
+            )
+
             if vectorstore:
                 self.coordinator.vectorstore = vectorstore
                 self.coordinator.qa_chain = get_rag_chain(
-                    vectorstore, MODEL_NAME,
+                    vectorstore,
+                    MODEL_NAME,
                     use_gpu=self.coordinator.use_gpu,
-                    folder_path=self.coordinator.folder_path
+                    folder_path=self.coordinator.folder_path,
                 )
+
             try:
                 if not getattr(self.coordinator, "closing", False):
                     self.signals.finished.emit()
             except RuntimeError:
                 pass
-        except Exception as e:
+
+        except Exception:
             try:
                 if not getattr(self.coordinator, "closing", False):
                     self.signals.error.emit(traceback.format_exc())
             except RuntimeError:
                 pass
+
         finally:
-            if hasattr(self.coordinator, 'active_runnables'):
+            if hasattr(self.coordinator, "active_runnables"):
                 self.coordinator.active_runnables = [
                     r for r in self.coordinator.active_runnables if r != self
                 ]
@@ -71,6 +90,7 @@ class AskRunnable(QRunnable):
                 except RuntimeError:
                     pass
                 return
+
             response = self.coordinator.qa_chain(self.query, file_filter=self.file_filter)
             sources = response.get("sources", "")
             if isinstance(sources, set):
@@ -78,28 +98,32 @@ class AskRunnable(QRunnable):
             elif not sources:
                 sources = "Неизвестно"
             response["sources"] = sources
+
             try:
                 if not getattr(self.coordinator, "closing", False):
                     self.signals.result.emit(response)
             except RuntimeError:
                 pass
+
         except Exception as e:
             try:
                 if not getattr(self.coordinator, "closing", False):
                     self.signals.result.emit({"result": f"Ошибка: {e}", "sources": ""})
             except RuntimeError:
                 pass
+
         finally:
-            if hasattr(self.coordinator, 'active_runnables'):
+            if hasattr(self.coordinator, "active_runnables"):
                 self.coordinator.active_runnables = [
                     r for r in self.coordinator.active_runnables if r != self
                 ]
 
 
 class RAGCoordinator(QObject):
-    indexing_started = Signal()
-    indexing_finished = Signal()
-    indexing_error = Signal(str)
+    indexing_started = pyqtSignal()
+    indexing_finished = pyqtSignal()
+    indexing_error = pyqtSignal(str)
+    indexing_progress = pyqtSignal(int, int, int)  # current_files, total_files, percent
 
     _instance = None
 
@@ -113,7 +137,8 @@ class RAGCoordinator(QObject):
 
     def __init__(self, folder_path: str):
         super().__init__()
-        if hasattr(self, "initialized"): return
+        if hasattr(self, "initialized"):
+            return
 
         self.folder_path = folder_path
         self.vectorstore = None
@@ -135,7 +160,8 @@ class RAGCoordinator(QObject):
             return True
 
     def start_indexing(self):
-        if self.is_indexing: return
+        if self.is_indexing:
+            return
         self.is_indexing = True
         self.indexing_started.emit()
 

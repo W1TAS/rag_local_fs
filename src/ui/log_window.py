@@ -1,4 +1,5 @@
-from PySide6 import QtWidgets, QtCore, QtGui
+# src/ui/log_window.py
+from PyQt6 import QtWidgets, QtCore, QtGui
 import os
 from cache import get_cache_root
 
@@ -6,7 +7,7 @@ from cache import get_cache_root
 class LogWindow(QtWidgets.QDialog):
     def __init__(self, parent=None, log_path=None, refresh_interval_ms=1000):
         super().__init__(parent)
-        self.setWindowTitle("Логи")
+        self.setWindowTitle("Logs")
         self.resize(800, 600)
         self.log_path = log_path or os.path.join(get_cache_root(), "app.log")
 
@@ -18,13 +19,19 @@ class LogWindow(QtWidgets.QDialog):
         self.text.setFont(font)
 
         btn_layout = QtWidgets.QHBoxLayout()
-        self.refresh_btn = QtWidgets.QPushButton("Обновить")
+        self.refresh_btn = QtWidgets.QPushButton("Refresh")
         self.refresh_btn.clicked.connect(self.load)
-        self.clear_btn = QtWidgets.QPushButton("Очистить лог")
+        
+        self.pause_btn = QtWidgets.QPushButton("Pause")
+        self.pause_btn.clicked.connect(self.toggle_pause)
+        self.is_paused = False
+        
+        self.clear_btn = QtWidgets.QPushButton("Clear Log")
         self.clear_btn.clicked.connect(self.clear_log)
-        self.open_folder_btn = QtWidgets.QPushButton("Открыть папку")
+        self.open_folder_btn = QtWidgets.QPushButton("Open Folder")
         self.open_folder_btn.clicked.connect(self.open_folder)
         btn_layout.addWidget(self.refresh_btn)
+        btn_layout.addWidget(self.pause_btn)
         btn_layout.addWidget(self.clear_btn)
         btn_layout.addWidget(self.open_folder_btn)
         btn_layout.addStretch()
@@ -41,7 +48,7 @@ class LogWindow(QtWidgets.QDialog):
     def load(self):
         try:
             if not os.path.exists(self.log_path):
-                self.text.setPlainText("Лог файл не найден: %s" % self.log_path)
+                self.text.setPlainText("Log file not found: %s" % self.log_path)
                 return
             with open(self.log_path, "r", encoding="utf-8", errors="replace") as f:
                 data = f.read()
@@ -49,9 +56,19 @@ class LogWindow(QtWidgets.QDialog):
             if len(lines) > 2000:
                 lines = lines[-2000:]
             self.text.setPlainText("\n".join(lines))
-            self.text.moveCursor(QtGui.QTextCursor.End)
+            self.text.moveCursor(QtGui.QTextCursor.MoveOperation.End)
         except Exception as e:
-            self.text.setPlainText(f"Ошибка чтения лога: {e}")
+            self.text.setPlainText(f"Error reading log: {e}")
+
+    def toggle_pause(self):
+        """Toggle auto-refresh pause state"""
+        self.is_paused = not self.is_paused
+        if self.is_paused:
+            self.timer.stop()
+            self.pause_btn.setText("Resume")
+        else:
+            self.timer.start()
+            self.pause_btn.setText("Pause")
 
     def clear_log(self):
         try:
@@ -59,14 +76,14 @@ class LogWindow(QtWidgets.QDialog):
                 f.write("")
             self.load()
         except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "Ошибка", f"Не удалось очистить лог: {e}")
+            QtWidgets.QMessageBox.warning(self, "Error", f"Failed to clear log: {e}")
 
     def open_folder(self):
         folder = os.path.dirname(self.log_path)
         try:
             if not os.path.exists(folder):
                 os.makedirs(folder, exist_ok=True)
-            if os.name == 'nt':
+            if os.name == "nt":
                 try:
                     os.startfile(folder)
                     return
@@ -74,4 +91,4 @@ class LogWindow(QtWidgets.QDialog):
                     pass
             QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(folder))
         except Exception as e:
-            QtWidgets.QMessageBox.information(self, "Не найдено", f"{folder}\nОшибка: {e}")
+            QtWidgets.QMessageBox.information(self, "Not found", f"{folder}\nError: {e}")

@@ -1,9 +1,11 @@
+# src/app.py
+import easyocr
 import sys
 import os
 import logging
 from logging.handlers import RotatingFileHandler
 from cache import get_cache_root, prepare_virtual_folder_for_file
-from PySide6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication
 from ui.main_window import MainWindow
 
 
@@ -56,7 +58,7 @@ def main():
         log_dir = get_cache_root()
         os.makedirs(log_dir, exist_ok=True)
         log_path = os.path.join(log_dir, "app.log")
-        handler = RotatingFileHandler(log_path, maxBytes=5 * 1024 * 1024, backupCount=3, encoding='utf-8')
+        handler = RotatingFileHandler(log_path, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
         fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
         handler.setFormatter(fmt)
         root_logger = logging.getLogger()
@@ -69,6 +71,7 @@ def main():
             def __init__(self, logger, level=logging.INFO):
                 self.logger = logger
                 self.level = level
+
             def write(self, buf):
                 try:
                     for line in buf.rstrip().splitlines():
@@ -78,6 +81,7 @@ def main():
                         orig_stdout.write(buf)
                     except Exception:
                         pass
+
             def flush(self):
                 try:
                     orig_stdout.flush()
@@ -96,16 +100,17 @@ def main():
 
     app = QApplication(sys.argv)
     try:
-        from PySide6.QtGui import QIcon
-        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        from PyQt6.QtGui import QIcon
+
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         icons_dir_candidates = [
-            os.path.join(repo_root, 'assets', 'icons'),
-            os.path.join(repo_root, '..', 'assets', 'icons'),
+            os.path.join(repo_root, "assets", "icons"),
+            os.path.join(repo_root, "..", "assets", "icons"),
         ]
         icons_dir = next((p for p in icons_dir_candidates if os.path.isdir(p)), icons_dir_candidates[0])
         app_icon_candidates = [
-            os.path.join(icons_dir, 'app_icon.ico'),
-            os.path.join(icons_dir, 'app_icon.png'),
+            os.path.join(icons_dir, "app_icon.ico"),
+            os.path.join(icons_dir, "app_icon.png"),
         ]
         app_icon_path = next((p for p in app_icon_candidates if os.path.exists(p)), None)
         if app_icon_path:
@@ -115,22 +120,38 @@ def main():
                 pass
     except Exception:
         pass
+
+    # Fixed dark theme (does not depend on OS theme).
+    try:
+        MainWindow.apply_dark_theme(app)
+    except Exception:
+        pass
+
     app.main_window = MainWindow(folder_path)
 
-    app.aboutToQuit.connect(lambda: app.main_window.coordinator.close() if app.main_window.coordinator else None)
+    app.aboutToQuit.connect(
+        lambda: app.main_window.coordinator.close() if app.main_window.coordinator else None
+    )
 
     if folder_path and initial_mode:
+
         def _on_index_ready():
             try:
                 coord = app.main_window.coordinator
                 if not coord:
                     return
                 if initial_mode == "tell":
-                    coord.ask_async("О чем файлы", initial_file_filter, lambda resp: app.main_window.on_answer(resp))
+                    coord.ask_async(
+                        "О чем файлы",
+                        initial_file_filter,
+                        lambda resp: app.main_window.on_answer(resp),
+                    )
                 elif initial_mode == "ask":
                     app.main_window.input_field.setFocus()
                     if initial_file_filter:
-                        app.main_window.input_field.setPlainText(f"Вопрос про файл {os.path.basename(initial_file_filter)}:\n")
+                        app.main_window.input_field.setText(
+                            f"Вопрос про файл {os.path.basename(initial_file_filter)}:"
+                        )
                 try:
                     coord.indexing_finished.disconnect(_on_index_ready)
                 except Exception:
