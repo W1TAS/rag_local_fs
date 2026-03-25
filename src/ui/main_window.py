@@ -8,6 +8,7 @@ from PyQt6 import QtWidgets, QtCore, QtGui
 from cache import clear_folder_cache, get_folder_cache_dir
 from config import MODEL_NAME, SUPPORTED_FORMATS
 from coordinator import RAGCoordinator
+from ui.autocomplete_input import AutocompleteLineEdit
 from ui.chat_delegate import ChatItemDelegate
 from ui.chat_model import ChatListModel, ChatMessage
 from ui.log_window import LogWindow
@@ -287,8 +288,8 @@ class MainWindow(QtWidgets.QMainWindow):
         composer_layout.setContentsMargins(0, 0, 0, 0)
         composer_layout.setSpacing(10)
 
-        self.input_field = QtWidgets.QLineEdit()
-        self.input_field.setPlaceholderText("Ask about your documents... (Enter to send)")
+        self.input_field = AutocompleteLineEdit()
+        self.input_field.setPlaceholderText("Ask about your documents… (Tab/→ to accept suggestion, Esc for next)")
         self.input_field.returnPressed.connect(self.send_question)
 
         self.send_btn = QtWidgets.QPushButton("Send")
@@ -330,7 +331,8 @@ class MainWindow(QtWidgets.QMainWindow):
         tools_menu = menubar.addMenu("Tools")
         tools_menu.addAction("Settings", self.select_folder_dialog)
         tools_menu.addSeparator()
-        tools_menu.addAction("Clear Cache", self.on_clear_cache)
+        tools_menu.addAction("Clear Index Cache", self.on_clear_cache)
+        tools_menu.addAction("Clear Summary Cache", self.on_clear_summary_cache)
 
         help_menu = menubar.addMenu("Help")
         help_menu.addAction("About", self.show_about_dialog)
@@ -379,6 +381,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_clear_cache_btn.setStyleSheet("margin: 2px 4px 2px 4px;")
         sb.addPermanentWidget(self.status_clear_cache_btn)
 
+        self.status_clear_summary_btn = QtWidgets.QPushButton("Clear Summary")
+        self.status_clear_summary_btn.clicked.connect(self.on_clear_summary_cache)
+        self.status_clear_summary_btn.setMaximumWidth(130)
+        self.status_clear_summary_btn.setEnabled(bool(self.folder_path))
+        self.status_clear_summary_btn.setStyleSheet("margin: 2px 4px 2px 4px;")
+        sb.addPermanentWidget(self.status_clear_summary_btn)
+
     def _setup_tray(self):
         try:
             app = QtWidgets.QApplication.instance()
@@ -396,6 +405,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.input_field.setEnabled(has_folder)
         self.reindex_btn.setEnabled(has_folder)
         self.status_clear_cache_btn.setEnabled(has_folder)
+        if hasattr(self, "status_clear_summary_btn"):
+            self.status_clear_summary_btn.setEnabled(has_folder)
 
     def _connect_signals(self):
         if not self.coordinator:
@@ -432,6 +443,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if getattr(self.coordinator, "is_indexing", False):
             self._on_indexing_started()
 
+        self.input_field.train_on_folder(self.folder_path)
+
     def select_folder_dialog(self):
         folder = QtWidgets.QFileDialog.getExistingDirectory(
             self, "Select a folder for indexing", os.getcwd()
@@ -453,11 +466,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.file_tree.setModel(self.fs_model)
         self.file_tree.setRootIndex(root_index)
-        
+
         # Hide all columns except the first one (filename)
         for col in range(1, self.fs_model.columnCount()):
             self.file_tree.setColumnHidden(col, True)
-        
+
         try:
             self.file_tree.expand(root_index)
         except Exception:
@@ -604,6 +617,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.add_message(query, is_user=True)
         self.input_field.clear()
 
+        # Обновить историю для автодополнения
+        all_user_msgs = [
+            content
+            for conv in self.conversations
+            for content, is_user, _ts in conv
+            if is_user
+        ]
+        self.input_field.set_history(all_user_msgs)
+
         self.pending_typing_chat_idx = self.current_chat_idx
         self._add_typing_item_for_chat(self.pending_typing_chat_idx)
         self.start_typing_animation()
@@ -631,11 +653,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.add_message(ai_text, is_user=False)
 
     def add_message(
-        self,
-        text: str,
-        is_user: bool = False,
-        is_source: bool = False,
-        chat_idx: Optional[int] = None,
+            self,
+            text: str,
+            is_user: bool = False,
+            is_source: bool = False,
+            chat_idx: Optional[int] = None,
     ):
         if chat_idx is None:
             chat_idx = self.current_chat_idx
@@ -685,6 +707,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_progress_label.setText("Ready for questions!")
         self.apply_ui_enabled_state()
         self.add_message("Ready for questions!", chat_idx=self.current_chat_idx)
+
+        self.input_field.retrain_folder(self.folder_path)
 
     def _on_indexing_error(self, msg: str):
         self.status_progress_bar.setVisible(False)
@@ -783,15 +807,15 @@ class MainWindow(QtWidgets.QMainWindow):
         index = self.chat_list.indexAt(pos)
         if not index.isValid():
             return
-        
+
         text = self.chat_model.data(index, ChatListModel.TextRole) or ""
         if not text:
             return
-        
+
         # Remove HTML tags for display
         import re
         clean_text = re.sub('<[^<]+?>', '', text)
-        
+
         menu = QtWidgets.QMenu(self)
         copy_act = menu.addAction("Copy")
         action = menu.exec(self.chat_list.mapToGlobal(pos))
@@ -849,19 +873,41 @@ class MainWindow(QtWidgets.QMainWindow):
         if success:
             QtWidgets.QMessageBox.information(self, "Cache cleared", "Cache cleared successfully.")
             if (
-                QtWidgets.QMessageBox.question(
-                    self,
-                    "Reindex?",
-                    "Reindex this folder now?",
-                    QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-                )
-                == QtWidgets.QMessageBox.StandardButton.Yes
+                    QtWidgets.QMessageBox.question(
+                        self,
+                        "Reindex?",
+                        "Reindex this folder now?",
+                        QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                    )
+                    == QtWidgets.QMessageBox.StandardButton.Yes
             ):
                 self.reindex()
         else:
             QtWidgets.QMessageBox.warning(
                 self, "Error", "Failed to clear cache. Check permissions and try again."
             )
+
+    def on_clear_summary_cache(self):
+        """Удалить только кэш суммаризации (не трогает FAISS-индекс)."""
+        if not self.folder_path:
+            QtWidgets.QMessageBox.information(self, "No folder", "First select a folder.")
+            return
+        try:
+            from rag import clear_summary_cache
+            removed = clear_summary_cache(self.folder_path)
+            if removed:
+                QtWidgets.QMessageBox.information(
+                    self, "Done",
+                    "Summary cache cleared.\n"
+                    "Next question will regenerate summaries from scratch."
+                )
+            else:
+                QtWidgets.QMessageBox.information(
+                    self, "Nothing to clear",
+                    "No summary cache found for this folder."
+                )
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Error", f"Failed to clear summary cache: {e}")
 
     def open_logs(self):
         try:
@@ -888,6 +934,13 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             if getattr(self, "tray_icon", None):
                 self.tray_icon.stop()
+        except Exception:
+            pass
+
+        # Cleanup autocomplete
+        try:
+            if hasattr(self, "input_field"):
+                self.input_field.cleanup()
         except Exception:
             pass
         super().closeEvent(event)
