@@ -140,7 +140,9 @@ def build_index(folder_path, embedding_model, progress_callback=None):
 
     # === 4. Разбиение ===
     print(f"[INDEXER] Разбиение на чанки: {len(texts)} документов")
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=150)
+    # chunk_size=800: меньшие чанки = точнее семантический поиск.
+    # chunk_overlap=80: небольшой перекрыт для сохранения контекста на границах.
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=80)
     split_texts = []
     split_metadatas = []
     total_chunks = 0
