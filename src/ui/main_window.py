@@ -238,14 +238,27 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.preview_title = QtWidgets.QLabel("Document Preview")
         self.preview_title.setStyleSheet("color:#9aa; font-weight:600;")
+        self.preview_title.setTextFormat(QtCore.Qt.TextFormat.RichText)
         preview_toolbar_layout.addWidget(self.preview_title)
         preview_toolbar_layout.addStretch()
+
+        self.clear_highlight_btn = QtWidgets.QPushButton("✕ Clear highlight")
+        self.clear_highlight_btn.setVisible(False)
+        self.clear_highlight_btn.setStyleSheet(
+            "padding: 3px 8px; font-size: 11px; color: #ffd966; border-color: #5a5000;"
+        )
+        self.clear_highlight_btn.clicked.connect(self._clear_preview_highlight)
+        preview_toolbar_layout.addWidget(self.clear_highlight_btn)
 
         self.preview_browser = QtWidgets.QTextBrowser()
         self.preview_browser.setReadOnly(True)
         self.preview_browser.setOpenExternalLinks(False)
         self.preview_browser.setStyleSheet("font-family: Consolas, 'JetBrains Mono', monospace; font-size: 12.5px;")
         self.preview_browser.setPlainText("Select a file in Files to view its contents.")
+
+        # Храним путь к текущему открытому файлу и его полный текст
+        self._preview_current_path: Optional[str] = None
+        self._preview_current_text: str = ""
 
         preview_layout.addWidget(preview_toolbar)
         preview_layout.addWidget(self.preview_browser, 1)
@@ -486,48 +499,162 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         file_path = self.fs_model.filePath(index)
+        self.clear_highlight_btn.setVisible(False)
         self._load_file_preview(file_path)
 
-    def _load_file_preview(self, file_path: str):
+    def _load_file_preview(self, file_path: str, highlight_chunks=None):
         if not file_path or not os.path.exists(file_path):
             self.preview_browser.setPlainText("Файл не найден.")
+            self._preview_current_path = None
+            self._preview_current_text = ""
             return
 
         ext = os.path.splitext(file_path)[1].lower().lstrip(".")
+        text = ""
         try:
             if ext in ("txt", "md"):
                 with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                    self.preview_browser.setPlainText(f.read())
+                    text = f.read()
             elif ext == "html":
                 import bs4
-
                 with open(file_path, "r", encoding="utf-8", errors="replace") as f:
                     soup = bs4.BeautifulSoup(f.read(), "html.parser")
-                self.preview_browser.setPlainText(soup.get_text())
+                text = soup.get_text()
             elif ext == "pdf":
                 import PyPDF2
-
                 with open(file_path, "rb") as f:
                     reader = PyPDF2.PdfReader(f)
                     text = "\n".join((page.extract_text() or "") for page in reader.pages)
-                self.preview_browser.setPlainText(text)
             elif ext == "docx":
                 from docx import Document as DocxDocument
-
                 doc = DocxDocument(file_path)
-                self.preview_browser.setPlainText("\n".join(p.text for p in doc.paragraphs))
+                text = "\n".join(p.text for p in doc.paragraphs)
             elif ext in ("png", "jpg", "jpeg"):
-                self.preview_browser.setPlainText(
+                text = (
                     "Изображение: OCR/превью может занять много времени.\n"
                     "TODO: добавить фоновое извлечение текста для изображений."
                 )
             else:
-                self.preview_browser.setPlainText(
+                text = (
                     f"Preview for extension '.{ext}' is not implemented.\n"
                     f"Supported formats: {', '.join(SUPPORTED_FORMATS)}"
                 )
         except Exception as e:
-            self.preview_browser.setPlainText(f"Preview error: {e}")
+            text = f"Preview error: {e}"
+
+        self._preview_current_path = file_path
+        self._preview_current_text = text
+
+        if highlight_chunks:
+            self._render_preview_with_highlights(text, highlight_chunks)
+        else:
+            self.preview_browser.setPlainText(text)
+            self.preview_title.setText(f"Document Preview — {os.path.basename(file_path)}")
+
+    def _render_preview_with_highlights(self, text: str, highlight_chunks: list):
+        """
+        Рендерит текст в превью с подсветкой чанков-источников.
+        Использует QTextBrowser с HTML-разметкой.
+        """
+        import html as html_module
+
+        # Собираем диапазоны для подсветки: (start, end)
+        ranges = []
+        for chunk in highlight_chunks:
+            start = chunk.get("start_char")
+            end = chunk.get("end_char")
+            if start is not None and end is not None and start < end <= len(text):
+                ranges.append((start, end))
+
+        if not ranges:
+            # Нет точных позиций — пробуем поиск по тексту чанка
+            for chunk in highlight_chunks:
+                chunk_text = chunk.get("text", "").strip()
+                if not chunk_text:
+                    continue
+                # Ищем первые 80 символов чанка как якорь
+                anchor = chunk_text[:80]
+                pos = text.find(anchor)
+                if pos != -1:
+                    ranges.append((pos, pos + len(chunk_text)))
+
+        # Объединяем пересекающиеся диапазоны
+        ranges.sort()
+        merged = []
+        for start, end in ranges:
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append([start, end])
+
+        # Строим HTML с подсветкой
+        html_parts = []
+        prev = 0
+        for start, end in merged:
+            # Текст до подсвеченного фрагмента
+            before = html_module.escape(text[prev:start])
+            # Подсвеченный фрагмент
+            highlighted = html_module.escape(text[start:end])
+            html_parts.append(before)
+            html_parts.append(
+                f'<mark style="background-color:#3a3000; color:#ffd966; '
+                f'border-radius:3px; padding:1px 0px;">{highlighted}</mark>'
+            )
+            prev = end
+
+        html_parts.append(html_module.escape(text[prev:]))
+
+        body = "".join(html_parts).replace("\n", "<br>")
+        full_html = (
+            '<html><body style="'
+            'background:#1e1e1e; color:#d4d4d4; '
+            'font-family:Consolas,JetBrains Mono,monospace; font-size:12.5px; '
+            'white-space:pre-wrap; word-wrap:break-word;">'
+            f"{body}</body></html>"
+        )
+        self.preview_browser.setHtml(full_html)
+
+        # Скроллим к первому подсвеченному фрагменту
+        if merged:
+            self._scroll_preview_to_char(merged[0][0], text)
+
+        fname = os.path.basename(self._preview_current_path or "")
+        n = len(merged)
+        self.preview_title.setText(
+            f"Document Preview — {fname}  "
+            f'<span style="color:#ffd966;">▶ {n} фрагмент(ов) из ответа</span>'
+        )
+        # preview_title — QLabel, поддерживает richtext
+        self.preview_title.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        self.clear_highlight_btn.setVisible(True)
+
+    def _clear_preview_highlight(self):
+        """Убирает подсветку и показывает файл в обычном виде."""
+        self.clear_highlight_btn.setVisible(False)
+        if self._preview_current_path:
+            self._load_file_preview(self._preview_current_path)
+        else:
+            self.preview_browser.setPlainText("Select a file in Files to view its contents.")
+            self.preview_title.setText("Document Preview")
+
+    def _scroll_preview_to_char(self, char_pos: int, full_text: str):
+        """Скроллит превью к символу char_pos."""
+        # Считаем примерную позицию строки
+        line_number = full_text[:char_pos].count("\n")
+        # Используем курсор QTextBrowser для поиска позиции
+        cursor = self.preview_browser.textCursor()
+        cursor.movePosition(QtGui.QTextCursor.MoveOperation.Start)
+        self.preview_browser.setTextCursor(cursor)
+
+        # Ищем текст через find для позиционирования
+        anchor_text = full_text[char_pos:char_pos + 40].strip()
+        if anchor_text:
+            import html as html_module
+            self.preview_browser.find(anchor_text)
+            found_cursor = self.preview_browser.textCursor()
+            if not found_cursor.isNull():
+                self.preview_browser.setTextCursor(found_cursor)
+                self.preview_browser.ensureCursorVisible()
 
     def _ensure_coordinator(self) -> bool:
         if self.coordinator is None:
@@ -643,10 +770,42 @@ class MainWindow(QtWidgets.QMainWindow):
 
         result = response.get("result", "Нет ответа")
         sources = response.get("sources", "")
+        highlight_chunks = response.get("highlight_chunks", [])
 
         self.add_message(result, chat_idx=chat_idx)
         if sources and sources != "Неизвестно":
             self.add_message(f"Источник: {sources}", is_source=True, chat_idx=chat_idx)
+
+        # Автоматически открыть файл-источник в превью с подсветкой найденных фрагментов
+        if highlight_chunks:
+            # Берём файл из первого чанка
+            source_path = highlight_chunks[0].get("source", "")
+            if source_path and os.path.exists(source_path):
+                # Фильтруем чанки только для этого файла
+                file_chunks = [c for c in highlight_chunks if c.get("source") == source_path]
+                self._load_file_preview(source_path, highlight_chunks=file_chunks)
+                # Выделяем файл в дереве
+                self._select_file_in_tree(source_path)
+        elif sources and sources not in ("Неизвестно", "все файлы", "Нет источников"):
+            # Нет позиций чанков (старый индекс) — просто открыть файл
+            source_documents = response.get("source_documents", [])
+            if source_documents:
+                src = source_documents[0].metadata.get("source", "")
+                if src and os.path.exists(src):
+                    self._load_file_preview(src)
+                    self._select_file_in_tree(src)
+
+    def _select_file_in_tree(self, file_path: str):
+        """Выделяет файл в дереве файлов (левая панель)."""
+        if not self.fs_model or not file_path:
+            return
+        try:
+            index = self.fs_model.index(file_path)
+            if index.isValid():
+                self.file_tree.setCurrentIndex(index)
+                self.file_tree.scrollTo(index)
+        except Exception:
+            pass
 
     def append_chat_message(self, user_text: str, ai_text: str):
         self.add_message(user_text, is_user=True)

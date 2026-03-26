@@ -150,7 +150,22 @@ def build_index(folder_path, embedding_model, progress_callback=None):
         chunks = text_splitter.split_text(text)
         total_chunks += len(chunks)
         split_texts.extend(chunks)
-        split_metadatas.extend([meta] * len(chunks))
+
+        # Вычисляем позицию каждого чанка в исходном тексте для подсветки в превью
+        search_start = 0
+        for chunk_idx, chunk in enumerate(chunks):
+            pos = text.find(chunk, search_start)
+            if pos == -1:
+                pos = search_start  # fallback
+            chunk_meta = dict(meta)
+            chunk_meta["chunk_index"] = chunk_idx
+            chunk_meta["start_char"] = pos
+            chunk_meta["end_char"] = pos + len(chunk)
+            chunk_meta["start_line"] = text[:pos].count("\n")
+            split_metadatas.append(chunk_meta)
+            if pos != -1:
+                search_start = pos + max(1, len(chunk) - 80)
+
         print(f"  → Док {i+1}: {len(chunks)} чанков")
 
     print(f"[INDEXER] Всего чанков: {total_chunks}")

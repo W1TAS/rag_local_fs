@@ -484,12 +484,60 @@ def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embedd
 
         _write_debug_chunks(query, raw_docs)
 
+        # Собираем данные для подсветки — только чанки реально использованные в ответе
+        highlight_chunks = []
+
+        # Если LLM сообщила об отсутствии информации — ничего не подсвечиваем
+        _no_answer_markers = [
+            "информация отсутствует", "нет информации", "нет данных",
+            "не содержит", "не найдено", "не упоминается", "отсутствует в",
+            "не могу ответить", "не нашёл", "не нашел", "нет ответа",
+            "не указано", "контекст не содержит",
+        ]
+        answer_lower = answer.lower()
+        answer_has_info = not any(m in answer_lower for m in _no_answer_markers)
+
+        if answer_has_info and final_docs:
+            answer_words = set(re.findall(r'\w{4,}', answer_lower))
+            # Убираем стоп-слова чтобы не было ложных совпадений
+            answer_words -= RUSSIAN_STOP_WORDS
+
+            for doc in final_docs:
+                src = doc.metadata.get("source", "")
+                if not src:
+                    continue
+
+                # Считаем долю слов чанка которые встречаются в ответе
+                chunk_words = set(re.findall(r'\w{4,}', doc.page_content.lower()))
+                chunk_words -= RUSSIAN_STOP_WORDS
+                if not chunk_words:
+                    continue
+
+                overlap = chunk_words & answer_words
+                score = len(overlap) / len(chunk_words)
+
+                # Порог: минимум 6% слов чанка должны присутствовать в ответе
+                if score >= 0.06:
+                    highlight_chunks.append({
+                        "source": src,
+                        "start_char": doc.metadata.get("start_char"),
+                        "end_char": doc.metadata.get("end_char"),
+                        "start_line": doc.metadata.get("start_line"),
+                        "chunk_index": doc.metadata.get("chunk_index"),
+                        "text": doc.page_content,
+                        "relevance_score": score,
+                    })
+
+            # Сортируем по релевантности — самые совпадающие чанки первыми
+            highlight_chunks.sort(key=lambda x: -x["relevance_score"])
+
         return {
             "result": answer,
             "source_documents": final_docs,
             "sources": ", ".join(sources),
             "keywords": extract_keywords_from_query(query, top_n=7),
-            "formatted_context": context[:500] + "..." if len(context) > 500 else context
+            "formatted_context": context[:500] + "..." if len(context) > 500 else context,
+            "highlight_chunks": highlight_chunks,
         }
 
     return wrapped_qa_chain
