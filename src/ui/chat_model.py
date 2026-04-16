@@ -64,3 +64,46 @@ class ChatListModel(QtCore.QAbstractListModel):
             self._messages[-1].text = "Генерация" + "." * dots
             idx = self.index(len(self._messages) - 1)
             self.dataChanged.emit(idx, idx, [self.TextRole])
+
+    def updateLastMessageText(self, new_text: str):
+        """Обновить текст последнего сообщения и уведомить view."""
+        if not self._messages:
+            return
+        last_idx = len(self._messages) - 1
+        self._messages[last_idx].text = new_text
+        idx = self.index(last_idx)
+        self.dataChanged.emit(idx, idx, [self.TextRole])
+
+    def appendToLastMessage(self, delta: str):
+        """Добавить дельту в конец текста последнего сообщения и обновить view."""
+        if not self._messages:
+            return
+        last_idx = len(self._messages) - 1
+        self._messages[last_idx].text = (self._messages[last_idx].text or "") + delta
+        idx = self.index(last_idx)
+        self.dataChanged.emit(idx, idx, [self.TextRole])
+
+    def setLastMessageTimestamp(self, ts: str):
+        """Установить timestamp последнего сообщения (например, при финализации стрима)."""
+        if not self._messages:
+            return
+        last_idx = len(self._messages) - 1
+        self._messages[last_idx].timestamp = ts
+        idx = self.index(last_idx)
+        self.dataChanged.emit(idx, idx, [self.TimestampRole])
+
+    def replaceLastMessage(self, text: str, is_user: bool, ts: str, kind: str = "message"):
+        """Заменить последнее сообщение полностью (текст, isUser, timestamp, kind).
+        Используется для замены частичного сообщения финальным.
+        """
+        if not self._messages:
+            # fallback: append
+            self.appendMessage(ChatMessage(text=text, isUser=is_user, timestamp=ts, kind=kind))
+            return
+        last_idx = len(self._messages) - 1
+        self._messages[last_idx].text = text
+        self._messages[last_idx].isUser = is_user
+        self._messages[last_idx].timestamp = ts
+        self._messages[last_idx].kind = kind
+        idx = self.index(last_idx)
+        self.dataChanged.emit(idx, idx, [self.TextRole, self.IsUserRole, self.TimestampRole, self.KindRole])

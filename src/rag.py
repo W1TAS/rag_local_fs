@@ -226,6 +226,65 @@ def summarize_all_in_one(vectorstore, model_name, use_gpu=True, folder_path=None
         return f"Ошибка суммирования: {e}"
 
 
+def generate_suggested_questions(vectorstore, model_name, use_gpu=True, folder_path=None, max_q=5):
+    """Генерирует 3-6 рекомендуемых вопросов по набору файлов в папке.
+    Возвращает список строк (вопросов) на русском.
+    """
+    if not _ollama_available():
+        return []
+
+    # Собираем превью каждого файла (первые 300 символов)
+    seen = set()
+    previews = []
+    for doc in vectorstore.docstore._dict.values():
+        source = doc.metadata.get("source")
+        if not source or source in seen:
+            continue
+        seen.add(source)
+        name = os.path.basename(source)
+        text = doc.page_content[:300].replace('\n', ' ')
+        previews.append(f"[{name}]: {text}")
+
+    context = "\n".join(previews)[:4000]
+
+    try:
+        try:
+            llm = ChatOllama(model=model_name,
+                             num_gpu=-1 if use_gpu else 0,
+                             temperature=0.2,
+                             base_url="http://127.0.0.1:11434",
+                             keep_alive="2m",
+                             timeout=30)
+        except TypeError:
+            llm = ChatOllama(model=model_name,
+                             num_gpu=-1 if use_gpu else 0,
+                             temperature=0.2,
+                             base_url="http://127.0.0.1:11434")
+    except Exception:
+        return []
+
+    prompt = ChatPromptTemplate.from_template(
+        """Ты — помощник, который генерирует короткие вопросы, которые пользователь мог бы задать по приведённым файлам.
+
+Файлы и их фрагменты:
+{context}
+
+Сгенерируй от 3 до {max_q} кратких пользовательских вопросов (на русском), каждый на новой строке. Вопросы должны быть разные и покрывать основные темы файлов.
+
+Ответ:"""
+    )
+
+    try:
+        response = llm.invoke(prompt.format(context=context, max_q=max_q))
+        text = response.content.strip()
+        # Разбиваем по строкам и фильтруем
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        # Обрезаем до max_q
+        return lines[:max_q]
+    except Exception:
+        return []
+
+
 # === КЛЮЧЕВЫЕ СЛОВА ===
 def extract_keywords_from_query(query, top_n=10, min_length=4):
     query_clean = re.sub(r'[^\w\s]', ' ', query.lower())
@@ -470,14 +529,150 @@ def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embedd
                 "formatted_context": ""
             }
         try:
-            answer = llm.invoke(prompt.format(context=context, input=query)).content.strip()
+            prompt_text = prompt.format(context=context, input=query)
+            # detect streaming capability on the LLM object
+            stream_fn = next(
+                (n for n in ("stream", "stream_invoke", "invoke_stream", "stream_chat", "stream_invoke_chat") if hasattr(llm, n)),
+                None,
+            )
+
+            if stream_fn:
+                gen = getattr(llm, stream_fn)(prompt_text)
+
+                def _stream_generator():
+                    """Streaming generator that yields only the delta (new text) on each chunk.
+                    This reduces duplication in the UI and allows append-only updates.
+                    Yields dicts like {"delta": "..." , "final": False} and a final payload with "final": True.
+                    """
+                    cum = ""
+                    last_text_chunk = ""
+                    try:
+                        for chunk in gen:
+                            # chunk may be object with textual attributes or plain string
+                            text_chunk = None
+                            # 1) plain string
+                            if isinstance(chunk, str):
+                                text_chunk = chunk
+                            # 2) objects with attributes
+                            elif hasattr(chunk, "content") and isinstance(getattr(chunk, "content"), str):
+                                text_chunk = getattr(chunk, "content")
+                            elif hasattr(chunk, "text") and isinstance(getattr(chunk, "text"), str):
+                                text_chunk = getattr(chunk, "text")
+                            elif isinstance(chunk, dict):
+                                # avoid dumping large metadata dicts (they have many keys but no textual keys)
+                                text_keys = [k for k in ("delta", "content", "text", "partial", "result") if k in chunk]
+                                if text_keys:
+                                    for k in text_keys:
+                                        v = chunk.get(k)
+                                        if isinstance(v, str) and v.strip():
+                                            text_chunk = v
+                                            break
+                                else:
+                                    # try nested choices
+                                    choices = chunk.get("choices")
+                                    if isinstance(choices, list) and choices:
+                                        first = choices[0]
+                                        if isinstance(first, dict):
+                                            for k in ("text", "message", "content"):
+                                                if k in first and isinstance(first[k], str) and first[k].strip():
+                                                    text_chunk = first[k]
+                                                    break
+                            else:
+                                # fallback: try to convert to str but only if short
+                                try:
+                                    s = str(chunk)
+                                    if 0 < len(s) < 200 and "response_metadata" not in s and "additional_kwargs" not in s:
+                                        text_chunk = s
+                                except Exception:
+                                    text_chunk = None
+
+                            if not text_chunk:
+                                # skip non-textual metadata
+                                continue
+
+                            # sanitize
+                            text_chunk = text_chunk.replace('\r', '')
+                            # compute delta — ideally text_chunk itself represents the new portion
+                            delta = text_chunk
+                            if not delta.strip():
+                                continue
+
+                            # avoid re-emitting identical consecutive chunks
+                            if delta == last_text_chunk:
+                                continue
+                            last_text_chunk = delta
+
+                            cum += delta
+                            yield {"delta": delta, "final": False}
+
+                    except Exception:
+                        # streaming failed — fall back to non-stream below
+                        pass
+
+                    answer = cum.strip()
+
+                    # Post-process highlight_chunks same as non-streaming branch
+                    sources = {best_file} if best_file else set()
+                    _write_debug_chunks(query, raw_docs)
+
+                    highlight_chunks = []
+                    _no_answer_markers = [
+                        "информация отсутствует", "нет информации", "нет данных",
+                        "не содержит", "не найдено", "не упоминается", "отсутствует в",
+                        "не могу ответить", "не нашёл", "не нашел", "нет ответа",
+                        "не указано", "контекст не содержит",
+                    ]
+                    answer_lower = answer.lower()
+                    answer_has_info = not any(m in answer_lower for m in _no_answer_markers)
+
+                    if answer_has_info and final_docs:
+                        answer_words = set(re.findall(r'\w{4,}', answer_lower))
+                        answer_words -= RUSSIAN_STOP_WORDS
+
+                        for doc in final_docs:
+                            src = doc.metadata.get("source", "")
+                            if not src:
+                                continue
+                            chunk_words = set(re.findall(r'\w{4,}', doc.page_content.lower()))
+                            chunk_words -= RUSSIAN_STOP_WORDS
+                            if not chunk_words:
+                                continue
+                            overlap = chunk_words & answer_words
+                            score = len(overlap) / len(chunk_words)
+                            if score >= 0.06:
+                                highlight_chunks.append({
+                                    "source": src,
+                                    "start_char": doc.metadata.get("start_char"),
+                                    "end_char": doc.metadata.get("end_char"),
+                                    "start_line": doc.metadata.get("start_line"),
+                                    "chunk_index": doc.metadata.get("chunk_index"),
+                                    "text": doc.page_content,
+                                    "relevance_score": score,
+                                })
+
+                        highlight_chunks.sort(key=lambda x: -x["relevance_score"])
+
+                    yield {
+                        "result": answer,
+                        "source_documents": final_docs,
+                        "sources": ", ".join(sources),
+                        "keywords": extract_keywords_from_query(query, top_n=7),
+                        "formatted_context": context[:500] + "..." if len(context) > 500 else context,
+                        "highlight_chunks": highlight_chunks,
+                        "final": True,
+                    }
+
+                return _stream_generator()
+
+            # Fallback: synchronous invoke
+            answer = llm.invoke(prompt_text).content.strip()
         except Exception as e:
             return {
                 "result": f"Ошибка при запросе к модели: {e}",
                 "source_documents": [],
                 "sources": "Нет источников",
                 "keywords": extract_keywords_from_query(query, top_n=7),
-                "formatted_context": context[:500] + "..." if len(context) > 500 else context
+                "formatted_context": context[:500] + "..." if len(context) > 500 else context,
             }
 
         sources = {best_file} if best_file else set()

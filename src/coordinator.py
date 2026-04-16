@@ -2,9 +2,11 @@
 import psutil
 import traceback
 from typing import Optional, Dict, Any, Callable
+import re
+import time
 from PyQt6.QtCore import QObject, pyqtSignal, QRunnable, QThreadPool
 from indexer import build_index
-from rag import get_rag_chain
+from rag import get_rag_chain, generate_suggested_questions
 from config import MODEL_NAME, EMBEDDING_MODEL
 
 
@@ -51,6 +53,19 @@ class IndexingRunnable(QRunnable):
                     folder_path=self.coordinator.folder_path,
                 )
 
+                # Generate suggested questions for the folder (non-blocking within this background runnable)
+                try:
+                    suggestions = generate_suggested_questions(
+                        vectorstore,
+                        MODEL_NAME,
+                        use_gpu=self.coordinator.use_gpu,
+                        folder_path=self.coordinator.folder_path,
+                        max_q=6,
+                    )
+                    self.coordinator.suggested_questions = suggestions or []
+                except Exception:
+                    self.coordinator.suggested_questions = []
+
             try:
                 if not getattr(self.coordinator, "closing", False):
                     self.signals.finished.emit()
@@ -91,17 +106,151 @@ class AskRunnable(QRunnable):
                     pass
                 return
 
-            response = self.coordinator.qa_chain(self.query, file_filter=self.file_filter)
+            # Вызываем цепочку — она может вернуть dict (синхронно) или iterable (streaming)
+            try:
+                resp = self.coordinator.qa_chain(self.query, file_filter=self.file_filter)
+            except Exception as e:
+                try:
+                    self.signals.result.emit({"result": f"Ошибка: {e}", "sources": ""})
+                except RuntimeError:
+                    pass
+                return
+
+            # Если ответ — итерируемый объект (stream), то пробежим по нему и эмитим частичные обновления
+            if hasattr(resp, "__iter__") and not isinstance(resp, dict) and not isinstance(resp, str):
+                try:
+                    cum = ""
+                    for item in resp:
+                        if getattr(self.coordinator, "closing", False):
+                            return
+
+                        # If the stream yields dicts with structure produced by rag._stream_generator
+                        if isinstance(item, dict):
+                            # If it's a delta chunk, emit delta directly
+                            if "delta" in item and item.get("delta"):
+                                delta = item.get("delta")
+                                cum += delta
+                                try:
+                                    if not getattr(self.coordinator, "closing", False):
+                                        self.signals.result.emit({"delta": delta, "final": False})
+                                except RuntimeError:
+                                    pass
+                                continue
+
+                            # If it's a partial cumulative (legacy), handle gracefully
+                            if "partial" in item and item.get("partial"):
+                                partial = item.get("partial")
+                                cum = partial
+                                try:
+                                    if not getattr(self.coordinator, "closing", False):
+                                        self.signals.result.emit({"partial": partial, "final": False})
+                                except RuntimeError:
+                                    pass
+                                continue
+
+                            # If item indicates final result
+                            if item.get("final") or item.get("done") or item.get("is_final"):
+                                final_text = item.get("result") or item.get("partial") or item.get("content") or ""
+                                sources = item.get("sources") if isinstance(item.get("sources"), (str, list, set)) else ""
+                                highlight_chunks = item.get("highlight_chunks", [])
+                                keywords = item.get("keywords", [])
+                                formatted_context = item.get("formatted_context", "")
+                                if isinstance(sources, set):
+                                    sources = ", ".join([s for s in sources if s])
+                                try:
+                                    if not getattr(self.coordinator, "closing", False):
+                                        self.signals.result.emit({
+                                            "result": final_text or cum,
+                                            "sources": sources,
+                                            "highlight_chunks": highlight_chunks,
+                                            "keywords": keywords,
+                                            "formatted_context": formatted_context,
+                                            "final": True,
+                                        })
+                                except RuntimeError:
+                                    pass
+                                return
+
+                            # Fallback: maybe item contains 'result'
+                            if "result" in item and item.get("result"):
+                                final_text = item.get("result")
+                                try:
+                                    if not getattr(self.coordinator, "closing", False):
+                                        self.signals.result.emit({"result": final_text, "final": True})
+                                except RuntimeError:
+                                    pass
+                                return
+
+                            # otherwise ignore metadata-only dicts
+                            continue
+
+                        # If plain string chunk — treat as delta
+                        if isinstance(item, str) and item.strip():
+                            delta = item
+                            cum += delta
+                            try:
+                                if not getattr(self.coordinator, "closing", False):
+                                    self.signals.result.emit({"delta": delta, "final": False})
+                            except RuntimeError:
+                                pass
+                            continue
+
+                    # Exhausted iterator — emit final
+                    try:
+                        if not getattr(self.coordinator, "closing", False):
+                            self.signals.result.emit({"result": cum, "final": True})
+                    except RuntimeError:
+                        pass
+                    return
+                except Exception:
+                    # fall through to non-stream handling
+                    pass
+
+            # Обычный (синхронный) ответ — это dict
+            response = resp if isinstance(resp, dict) else {}
             sources = response.get("sources", "")
             if isinstance(sources, set):
                 sources = ", ".join([s for s in sources if s])
             elif not sources:
                 sources = "Неизвестно"
-            response["sources"] = sources
 
+            final_text = response.get("result", "") or ""
+            highlight_chunks = response.get("highlight_chunks", [])
+
+            # Разбиваем ответ на предложения для имитации поточной генерации
+            parts = [p.strip() for p in re.split(r'(?<=[\.!\?])\s+', final_text) if p.strip()]
+            if not parts and final_text:
+                parts = [final_text]
+
+            cum = ""
             try:
-                if not getattr(self.coordinator, "closing", False):
-                    self.signals.result.emit(response)
+                for i, part in enumerate(parts):
+                    if getattr(self.coordinator, "closing", False):
+                        return
+                    if cum:
+                        cum = f"{cum} {part}"
+                    else:
+                        cum = part
+                    partial_payload = {"partial": cum, "final": False}
+                    try:
+                        self.signals.result.emit(partial_payload)
+                    except RuntimeError:
+                        pass
+                    time.sleep(0.05)
+
+                final_payload = {
+                    "result": final_text,
+                    "sources": sources,
+                    "highlight_chunks": highlight_chunks,
+                    "keywords": response.get("keywords", []),
+                    "formatted_context": response.get("formatted_context", ""),
+                    "final": True,
+                }
+                try:
+                    if not getattr(self.coordinator, "closing", False):
+                        self.signals.result.emit(final_payload)
+                except RuntimeError:
+                    pass
             except RuntimeError:
                 pass
 

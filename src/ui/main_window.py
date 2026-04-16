@@ -8,6 +8,7 @@ from PyQt6 import QtWidgets, QtCore, QtGui
 from cache import clear_folder_cache, get_folder_cache_dir
 from config import MODEL_NAME, SUPPORTED_FORMATS
 from coordinator import RAGCoordinator
+from rag import generate_suggested_questions
 from ui.autocomplete_input import AutocompleteLineEdit
 from ui.chat_delegate import ChatItemDelegate
 from ui.chat_model import ChatListModel, ChatMessage
@@ -312,6 +313,9 @@ class MainWindow(QtWidgets.QMainWindow):
         composer_layout.addWidget(self.input_field, 1)
         composer_layout.addWidget(self.send_btn, 0)
 
+        composer_layout.addWidget(self.input_field, 1)
+        composer_layout.addWidget(self.send_btn, 0)
+
         chat_layout.addWidget(chat_top)
         chat_layout.addWidget(self.chat_list, 1)
         chat_layout.addWidget(composer, 0)
@@ -321,8 +325,65 @@ class MainWindow(QtWidgets.QMainWindow):
         self.center_splitter.setStretchFactor(0, 1)
         self.center_splitter.setStretchFactor(1, 2)
 
+        # Suggestions panel on the RIGHT of the chat. Use QSplitter so panel is resizable like preview/chat.
+        self.suggestions_panel = QtWidgets.QWidget()
+        self.suggestions_panel.setMinimumWidth(200)
+        self.suggestions_panel.setMaximumWidth(600)
+        self.suggestions_panel.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Expanding)
+        # Remove any visible border/background to match dark theme
+        self.suggestions_panel.setStyleSheet("background: transparent; border: none;")
+        suggestions_layout = QtWidgets.QVBoxLayout(self.suggestions_panel)
+        suggestions_layout.setContentsMargins(8, 8, 8, 8)
+        suggestions_layout.setSpacing(6)
+
+        # Header with label and regenerate button
+        suggestions_header = QtWidgets.QWidget()
+        suggestions_header_layout = QtWidgets.QHBoxLayout(suggestions_header)
+        suggestions_header_layout.setContentsMargins(0, 0, 0, 0)
+        suggestions_header_layout.setSpacing(6)
+        self.suggestions_label = QtWidgets.QLabel("Suggested Questions")
+        self.suggestions_label.setStyleSheet("color:#9aa; font-weight:600;")
+        self.regen_btn = QtWidgets.QPushButton("Regenerate")
+        self.regen_btn.setMaximumWidth(110)
+        # ensure visible border and consistent styling (will be hidden per user request)
+        self.regen_btn.setStyleSheet("padding:4px 8px; border:1px solid #404040; border-radius:6px; background:#2a2a2a; color:#d4d4d4;")
+        self.regen_btn.clicked.connect(self.regenerate_suggestions)
+        suggestions_header_layout.addWidget(self.suggestions_label)
+        suggestions_header_layout.addStretch()
+        # Add the button but hide it — user requested to remove it; keeping element in case of future revert
+        suggestions_header_layout.addWidget(self.regen_btn)
+        suggestions_layout.addWidget(suggestions_header)
+        # hide the regenerate button as requested
+        try:
+            self.regen_btn.hide()
+        except Exception:
+            pass
+
+        self.suggestions_scroll = QtWidgets.QScrollArea()
+        self.suggestions_scroll.setWidgetResizable(True)
+        # make scroll area transparent and borderless
+        self.suggestions_scroll.setStyleSheet("background: transparent; border: none;")
+        self.suggestions_container = QtWidgets.QWidget()
+        self.suggestions_container.setStyleSheet("background: transparent; border: none;")
+        self.suggestions_container_layout = QtWidgets.QVBoxLayout(self.suggestions_container)
+        self.suggestions_container_layout.setContentsMargins(0, 0, 0, 0)
+        self.suggestions_container_layout.setSpacing(6)
+        self.suggestions_scroll.setWidget(self.suggestions_container)
+        suggestions_layout.addWidget(self.suggestions_scroll, 1)
+        self.suggestions_container_layout.addStretch()
+
+        # Keep panel hidden until content available.
+        self.suggestions_panel.setVisible(False)
+
+        # Place center splitter and suggestions panel in a horizontal QSplitter so both are resizable
+        content_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        content_splitter.addWidget(self.center_splitter)
+        content_splitter.addWidget(self.suggestions_panel)
+        content_splitter.setStretchFactor(0, 3)
+        content_splitter.setStretchFactor(1, 0)
+
         right_layout.addWidget(header, 0)
-        right_layout.addWidget(self.center_splitter, 1)
+        right_layout.addWidget(content_splitter, 1)
 
         root_layout.addWidget(left_panel, 0)
         root_layout.addWidget(right_container, 1)
@@ -457,6 +518,104 @@ class MainWindow(QtWidgets.QMainWindow):
             self._on_indexing_started()
 
         self.input_field.train_on_folder(self.folder_path)
+
+        # connect suggestions from coordinator if available
+        try:
+            self.set_suggestions(getattr(self.coordinator, 'suggested_questions', []) or [])
+        except Exception:
+            pass
+
+    def regenerate_suggestions(self):
+        if not self._ensure_coordinator():
+            return
+        if not getattr(self.coordinator, 'vectorstore', None):
+            QtWidgets.QMessageBox.information(self, 'No index', 'Index not available to generate suggestions.')
+            return
+        # Disable button and show status
+        self.regen_btn.setEnabled(False)
+        prev_label = self.status_progress_label.text()
+        self.status_progress_label.setText('Regenerating suggestions...')
+
+        class RegenRunnable(QtCore.QRunnable):
+            def __init__(self, mainwin, prev_label_text):
+                super().__init__()
+                self.mainwin = mainwin
+                # capture previous label to restore later
+                self.prev_label = prev_label_text
+
+            def run(self):
+                try:
+                    res = generate_suggested_questions(
+                        self.mainwin.coordinator.vectorstore,
+                        MODEL_NAME,
+                        use_gpu=self.mainwin.coordinator.use_gpu,
+                        folder_path=self.mainwin.folder_path,
+                        max_q=12,
+                    ) or []
+                except Exception:
+                    res = []
+
+                # Post back to main thread
+                QtCore.QTimer.singleShot(0, lambda: self._on_done(res))
+
+            def _on_done(self, res):
+                try:
+                    # If LLM returned nothing, prepare lightweight fallback suggestions from filenames
+                    if not res:
+                        fallback = []
+                        try:
+                            vs = getattr(self.mainwin.coordinator, 'vectorstore', None)
+                            if vs:
+                                seen = set()
+                                for doc in vs.docstore._dict.values():
+                                    src = doc.metadata.get('source')
+                                    if not src:
+                                        continue
+                                    name = os.path.basename(src)
+                                    if name in seen:
+                                        continue
+                                    seen.add(name)
+                                    fallback.append(f"О чём файл '{name}'?")
+                                    if len(fallback) >= 6:
+                                        break
+                        except Exception:
+                            fallback = []
+
+                        # If still empty, add generic prompts
+                        if not fallback:
+                            fallback = [
+                                'Сделай краткий обзор документов в папке',
+                                'Какие ключевые темы встречаются в этих файлах?',
+                                'Есть ли инструкции по настройке?'
+                            ]
+
+                        try:
+                            self.mainwin.set_suggestions(fallback)
+                        except Exception:
+                            # last-resort: set empty suggestions
+                            try:
+                                self.mainwin.set_suggestions([])
+                            except Exception:
+                                pass
+                    else:
+                        # normal path
+                        self.mainwin.set_suggestions(res)
+                except Exception as e:
+                    try:
+                        print(f"Regenerate suggestions failed: {e}")
+                    except Exception:
+                        pass
+                finally:
+                    try:
+                        self.mainwin.status_progress_label.setText(self.prev_label)
+                    except Exception:
+                        pass
+                    try:
+                        self.mainwin.regen_btn.setEnabled(True)
+                    except Exception:
+                        pass
+
+        QtCore.QThreadPool.globalInstance().start(RegenRunnable(self, prev_label))
 
     def select_folder_dialog(self):
         folder = QtWidgets.QFileDialog.getExistingDirectory(
@@ -764,16 +923,83 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def on_answer(self, response: dict, chat_idx: Optional[int] = None):
+        # Поддержка потоковой (partial) отрисовки: если получен ключ 'partial', обновляем текущее сообщение.
         if chat_idx is None:
             chat_idx = self.current_chat_idx
+
+        # потоковые дельта-обновления от стрима
+        if "delta" in response and not response.get("final", False):
+            delta = response.get("delta", "")
+            if not delta:
+                return
+            # Stop typing animation once first delta arrives to avoid "Генерация..." glitch
+            self.stop_typing(chat_idx)
+
+            # If we have a typing placeholder, remove it and append a partial assistant message with the delta
+            if self.chat_model._messages and self.chat_model._messages[-1].kind == "typing":
+                self.chat_model.removeTyping()
+                self.chat_model.appendMessage(ChatMessage(text=self._html_escape(delta), isUser=False, timestamp="", kind="partial"))
+            else:
+                # If last message is assistant partial, append delta to it
+                if self.chat_model._messages and self.chat_model._messages[-1].kind == "partial":
+                    # append only the delta to avoid re-rendering whole cumulative text repeatedly
+                    self.chat_model.appendToLastMessage(self._html_escape(delta))
+                else:
+                    # append new partial message (not added to conversation yet)
+                    self.chat_model.appendMessage(ChatMessage(text=self._html_escape(delta), isUser=False, timestamp="", kind="partial"))
+
+            self._scroll_to_bottom()
+            self._adjust_bubble_widths()
+            return
+
+        # потоковые обновления (legacy cumulative partial)
+        if "partial" in response and not response.get("final", False):
+            partial = response.get("partial", "")
+            # Stop typing animation once first partial arrives to avoid "Генерация..." glitch
+            self.stop_typing(chat_idx)
+
+            # Если у нас есть typing-сообщение — заменим его на частичный текст, иначе обновим/добавим частичное сообщение
+            if self.chat_model._messages and self.chat_model._messages[-1].kind == "typing":
+                # remove the typing placeholder and append a partial assistant message (no conversation entry yet)
+                self.chat_model.removeTyping()
+                self.chat_model.appendMessage(ChatMessage(text=self._html_escape(partial), isUser=False, timestamp="", kind="partial"))
+            else:
+                # If last message is assistant partial, update it
+                if self.chat_model._messages and self.chat_model._messages[-1].kind == "partial":
+                    self.chat_model.updateLastMessageText(self._html_escape(partial))
+                else:
+                    # append partial message (not added to conversation yet)
+                    self.chat_model.appendMessage(ChatMessage(text=self._html_escape(partial), isUser=False, timestamp="", kind="partial"))
+
+            self._scroll_to_bottom()
+            self._adjust_bubble_widths()
+            return
+
+        # Финальный ответ
+        # Остановим индикатор печати
         self.stop_typing(chat_idx)
 
         result = response.get("result", "Нет ответа")
         sources = response.get("sources", "")
         highlight_chunks = response.get("highlight_chunks", [])
 
-        self.add_message(result, chat_idx=chat_idx)
+        # If last assistant message is a partial (empty timestamp), replace it instead of appending
+        last_is_partial = (
+            self.chat_model._messages
+            and self.chat_model._messages[-1].kind == "partial"
+        )
+        ts = datetime.now().strftime("%H:%M")
+        if last_is_partial:
+            # Replace UI message
+            self.chat_model.replaceLastMessage(self._html_escape(result), False, ts)
+            # Persist into conversation storage
+            if 0 <= chat_idx < len(self.conversations):
+                self.conversations[chat_idx].append((result, False, ts))
+        else:
+            self.add_message(result, chat_idx=chat_idx)
+
         if sources and sources != "Неизвестно":
+            # sources is auxiliary; append as source message normally
             self.add_message(f"Источник: {sources}", is_source=True, chat_idx=chat_idx)
 
         # Автоматически открыть файл-источник в превью с подсветкой найденных фрагментов
@@ -853,7 +1079,16 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_indexing_progress(self, current_files: int, total_files: int, percent: int):
         if not self.status_progress_bar.isVisible():
             self.status_progress_bar.setVisible(True)
-        self.status_progress_bar.setValue(max(0, min(100, percent)))
+        # Clamp percent
+        pct = max(0, min(100, percent))
+        self.status_progress_bar.setValue(pct)
+
+        # If percent has reached 100 but coordinator still flags indexing in progress,
+        # show a 'finalizing' status because there may be post-processing (embeddings/suggestions).
+        if pct >= 100 and getattr(self.coordinator, 'is_indexing', False):
+            self.status_progress_label.setText("Finalizing index (building embeddings & suggestions)...")
+            return
+
         if total_files > 0:
             self.status_progress_label.setText(
                 f"Processing {current_files}/{total_files} files • {percent}%"
@@ -868,6 +1103,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.add_message("Ready for questions!", chat_idx=self.current_chat_idx)
 
         self.input_field.retrain_folder(self.folder_path)
+        # Update suggested questions from coordinator if available
+        try:
+            self.set_suggestions(getattr(self.coordinator, 'suggested_questions', []) or [])
+        except Exception:
+            pass
 
     def _on_indexing_error(self, msg: str):
         self.status_progress_bar.setVisible(False)
@@ -925,6 +1165,43 @@ class MainWindow(QtWidgets.QMainWindow):
         self.typing_states = {}
         self.pending_typing_chat_idx = None
         self._scroll_to_bottom()
+
+    def set_suggestions(self, suggestions: list):
+        """Показать список рекомендованных вопросов в правой панели."""
+        try:
+            layout = self.suggestions_container_layout
+            # Очистим старые виджеты (кроме stretch)
+            while layout.count() > 1:
+                item = layout.takeAt(0)
+                w = item.widget()
+                if w:
+                    w.deleteLater()
+
+            if not suggestions:
+                self.suggestions_panel.setVisible(False)
+                return
+
+            for q in suggestions[:12]:
+                # Use QLabel for suggestions so text wraps and adapts to panel width
+                lbl = QtWidgets.QLabel()
+                lbl.setText(q)
+                lbl.setWordWrap(True)
+                lbl.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+                lbl.setStyleSheet("padding:8px 10px; border-radius:6px; background:#2a2a2a; color:#d4d4d4;")
+                lbl.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+                # Single click: insert into input field
+                lbl.mousePressEvent = lambda ev, text=q: self.input_field.setText(text)
+                # Double click: insert and send
+                lbl.mouseDoubleClickEvent = lambda ev, text=q: self._on_suggestion_double_click(text)
+                layout.insertWidget(layout.count() - 1, lbl)
+
+            self.suggestions_panel.setVisible(True)
+        except Exception:
+            pass
+
+    def _on_suggestion_double_click(self, text: str):
+        self.input_field.setText(text)
+        self.send_question()
 
     def switch_chat(self, idx: int):
         self.current_chat_idx = idx
