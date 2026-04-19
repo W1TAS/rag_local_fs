@@ -5,7 +5,7 @@ from typing import Optional, Dict, Any, Callable
 from PyQt6.QtCore import QObject, pyqtSignal, QRunnable, QThreadPool
 from indexer import build_index
 from rag import get_rag_chain
-from config import MODEL_NAME, EMBEDDING_MODEL
+from config import MODEL_NAME, EMBEDDING_MODEL, get_llm_settings
 
 
 class IndexingSignals(QObject):
@@ -44,12 +44,7 @@ class IndexingRunnable(QRunnable):
 
             if vectorstore:
                 self.coordinator.vectorstore = vectorstore
-                self.coordinator.qa_chain = get_rag_chain(
-                    vectorstore,
-                    MODEL_NAME,
-                    use_gpu=self.coordinator.use_gpu,
-                    folder_path=self.coordinator.folder_path,
-                )
+                self.coordinator._rebuild_qa_chain()
 
             try:
                 if not getattr(self.coordinator, "closing", False):
@@ -123,7 +118,7 @@ class RAGCoordinator(QObject):
     indexing_started = pyqtSignal()
     indexing_finished = pyqtSignal()
     indexing_error = pyqtSignal(str)
-    indexing_progress = pyqtSignal(int, int, int)  # current_files, total_files, percent
+    indexing_progress = pyqtSignal(int, int, int)
 
     _instance = None
 
@@ -156,8 +151,27 @@ class RAGCoordinator(QObject):
         try:
             battery = psutil.sensors_battery()
             return battery is None or battery.power_plugged
-        except:
+        except Exception:
             return True
+
+    def _rebuild_qa_chain(self):
+        """Пересоздаёт qa_chain с актуальными настройками LLM из config."""
+        if not self.vectorstore:
+            return
+        s = get_llm_settings()
+        self.qa_chain = get_rag_chain(
+            self.vectorstore,
+            model_name=s["ollama_model"],
+            use_gpu=self.use_gpu,
+            folder_path=self.folder_path,
+            llm_provider=s["provider"],
+            openrouter_api_key=s["openrouter_key"],
+            openrouter_model=s["openrouter_model"],
+        )
+
+    def apply_llm_settings(self):
+        """Вызывается из UI после сохранения настроек — перезапускает LLM без переиндексации."""
+        self._rebuild_qa_chain()
 
     def start_indexing(self):
         if self.is_indexing:

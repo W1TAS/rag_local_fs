@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import pickle
 import hashlib
 from collections import Counter, defaultdict
@@ -7,7 +8,7 @@ import numpy as np
 import requests
 from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
-from config import SUPPORTED_FORMATS
+from config import SUPPORTED_FORMATS, get_llm_settings
 from typing import Optional
 
 
@@ -163,7 +164,7 @@ def summarize_all_in_one(vectorstore, model_name, use_gpu=True, folder_path=None
                 return pickle.load(f)
 
     if not _ollama_available():
-        return "Локальный сервер моделей (Ollama) недоступен. Запустите 'ollama serve' и выполните 'ollama pull' для нужных моделей."
+        return "Локальный сервер моделей (Ollama) недоступен. Запустите 'ollama serve' или переключитесь на облачную модель в настройках."
     try:
         try:
             llm = ChatOllama(model=model_name,
@@ -312,30 +313,225 @@ def _write_debug_chunks(query: str, docs: list) -> None:
         print(f"Не удалось записать чанки: {e}")
 
 
-# === ОСНОВНАЯ ЦЕПОЧКА ===
-def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embeddinggemma:latest", folder_path=None):
+def _docs_to_highlights(docs: list, top_k: int = 3, base_score: float = 0.5) -> list[dict]:
+    """
+    Конвертирует список документов в highlight-диапазоны.
+    Используется как fallback когда reranker недоступен или не смог проскорить.
+    Если start_char/end_char отсутствуют — ищет текст чанка в файле напрямую.
+    """
+    results = []
+    for doc in docs[:top_k]:
+        src = doc.metadata.get("source", "")
+        if not src:
+            continue
+        try:
+            start = int(doc.metadata.get("start_char") or 0)
+            end = int(doc.metadata.get("end_char") or 0)
+        except (TypeError, ValueError):
+            start, end = 0, 0
+
+        # Если позиции нулевые или некорректные — ищем текст в файле
+        if end <= start:
+            try:
+                ext = os.path.splitext(src)[1].lower().lstrip(".")
+                if ext in ("txt", "md"):
+                    with open(src, "r", encoding="utf-8", errors="replace") as f:
+                        file_text = f.read()
+                elif ext == "pdf":
+                    import PyPDF2
+                    with open(src, "rb") as f:
+                        reader = PyPDF2.PdfReader(f)
+                        file_text = "".join(p.extract_text() or "" for p in reader.pages)
+                elif ext == "docx":
+                    from docx import Document as _D
+                    file_text = "\n".join(p.text for p in _D(src).paragraphs)
+                else:
+                    file_text = doc.page_content
+                anchor = doc.page_content.strip()[:120]
+                pos = file_text.find(anchor)
+                if pos != -1:
+                    start = pos
+                    end = pos + len(doc.page_content)
+                else:
+                    # Последний resort: позиция 0, длина текста чанка
+                    start = 0
+                    end = len(doc.page_content)
+                    # Но тогда src должен быть заменён на in-memory текст
+            except Exception:
+                start, end = 0, len(doc.page_content)
+
+        results.append({
+            "source": src,
+            "start_char": start,
+            "end_char": end,
+            "text": doc.page_content,
+            "relevance_score": base_score,
+        })
+    return results
+
+
+def _rerank_highlight(query: str, docs: list, top_k: int = 3) -> list[dict]:
+    """
+    Скорирует каждый чанк reranker-моделью по паре (вопрос, чанк).
+    Возвращает top_k чанков с наибольшим score в виде highlight-диапазонов.
+    При любой ошибке reranker — возвращает все входные чанки как есть (не пустой список).
+    """
+    if not docs:
+        return []
+
+    try:
+        from reranker import _get_reranker
+        reranker = _get_reranker()
+    except Exception:
+        reranker = None
+
+    if reranker is None:
+        return _docs_to_highlights(docs, top_k)
+
+    # Батч-скоринг
+    pairs = [(query, doc.page_content) for doc in docs]
+    try:
+        import numpy as _np
+        raw_scores = reranker.predict(pairs)
+        scores = [float(s) for s in _np.atleast_1d(raw_scores).flatten()]
+    except Exception:
+        # Reranker упал — возвращаем все чанки без ранжирования
+        return _docs_to_highlights(docs, top_k)
+
+    # Берём top_k по score
+    ranked = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
+    top_docs = [doc for _, doc in ranked[:top_k]]
+    return _docs_to_highlights(top_docs, top_k, base_score=0.0)
+
+
+
+# Максимальная длина промпта в символах — обрезаем чтобы не получить 400
+_OPENROUTER_MAX_PROMPT_CHARS = 12_000
+
+
+class OpenRouterLLM:
+    """
+    Враппер для OpenRouter API с автоматическим retry и fallback на другие модели.
+
+    При 429 (rate limit) или 400 (контекст слишком длинный) автоматически
+    пробует следующую модель из OPENROUTER_FREE_MODELS.
+    Использует requests напрямую — без langchain-openai.
+    """
+
+    def __init__(self, api_key: str, model: str, temperature: float = 0.1):
+        self.api_key = api_key
+        self.model = model
+        self.temperature = temperature
+
+    class _Response:
+        def __init__(self, text: str):
+            self.content = text
+
+    def _prompt_to_text(self, prompt) -> str:
+        if hasattr(prompt, "to_string"):
+            text = prompt.to_string()
+        elif hasattr(prompt, "text"):
+            text = prompt.text
+        else:
+            text = str(prompt)
+        # Обрезаем слишком длинный промпт
+        if len(text) > _OPENROUTER_MAX_PROMPT_CHARS:
+            text = text[:_OPENROUTER_MAX_PROMPT_CHARS] + "\n...[контекст обрезан]"
+        return text
+
+    def _call_model(self, model: str, text: str):
+        import requests as _req
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": text}],
+            "temperature": self.temperature,
+        }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/W1TAS/rag_local_fs",
+            "X-Title": "RAG Local FS",
+        }
+        resp = _req.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            json=payload,
+            headers=headers,
+            timeout=60,
+        )
+        return resp
+
+    def invoke(self, prompt) -> "_Response":
+        import logging as _log
+
+        text = self._prompt_to_text(prompt)
+        _log.info(f"[OPENROUTER] Запрос к модели: {self.model}")
+
+        resp = self._call_model(self.model, text)
+
+        if resp.status_code == 200:
+            data = resp.json()
+            answer = data["choices"][0]["message"]["content"]
+            _log.info(f"[OPENROUTER] Ответ получен от: {self.model}")
+            result = self._Response(answer)
+            result.model_used = self.model
+            return result
+
+        # Человекочитаемые сообщения об ошибках
+        code = resp.status_code
+        try:
+            err = resp.json().get("error", {})
+            msg = err.get("message", resp.text[:200])
+        except Exception:
+            msg = resp.text[:200]
+
+        if code == 429:
+            raise RuntimeError(f"Модель {self.model} перегружена (rate limit). Попробуйте позже или выберите другую модель в настройках.")
+        elif code == 400:
+            raise RuntimeError(f"Модель {self.model} не приняла запрос (возможно слишком длинный контекст). Выберите другую модель.")
+        elif code == 401:
+            raise RuntimeError("Неверный API ключ OpenRouter. Проверьте ключ в настройках.")
+        elif code == 404:
+            raise RuntimeError(f"Модель {self.model} не найдена на OpenRouter. Выберите другую модель в настройках.")
+        else:
+            raise RuntimeError(f"Ошибка OpenRouter {code}: {msg}")
+
+
+
+def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embeddinggemma:latest", folder_path=None,
+                  llm_provider="ollama", openrouter_api_key="", openrouter_model=""):
     global llm
     llm = None
-    ollama_ok = _ollama_available()
-    if ollama_ok:
-        try:
+
+    if llm_provider == "openrouter" and openrouter_api_key:
+        import logging as _log
+        _log.info(f"[RAG] Инициализация OpenRouter, модель: {openrouter_model}")
+        llm = OpenRouterLLM(
+            api_key=openrouter_api_key,
+            model=openrouter_model or "openrouter/elephant-alpha",
+        )
+    else:
+        import logging as _log
+        _log.info(f"[RAG] Инициализация Ollama, модель: {model_name}")
+        ollama_ok = _ollama_available()
+        if ollama_ok:
             try:
-                llm = ChatOllama(model=model_name,
-                                 num_gpu=-1 if use_gpu else 0,
-                                 temperature=0.1,
-                                 base_url="http://127.0.0.1:11434",
-                                 keep_alive="5m",
-                                 timeout=60)
-            except TypeError:
-                llm = ChatOllama(model=model_name,
-                                 num_gpu=-1 if use_gpu else 0,
-                                 temperature=0.1,
-                                 base_url="http://127.0.0.1:11434")
-        except Exception as e:
-            llm = None
+                try:
+                    llm = ChatOllama(model=model_name,
+                                     num_gpu=-1 if use_gpu else 0,
+                                     temperature=0.1,
+                                     base_url="http://127.0.0.1:11434",
+                                     keep_alive="5m",
+                                     timeout=60)
+                except TypeError:
+                    llm = ChatOllama(model=model_name,
+                                     num_gpu=-1 if use_gpu else 0,
+                                     temperature=0.1,
+                                     base_url="http://127.0.0.1:11434")
+            except Exception as e:
+                llm = None
 
     prompt = ChatPromptTemplate.from_template(
-        """Отвечай на русском языке и строго на предоставленный вопрос. Используй только предоставленный тебе контекст.    
+        """Отвечай на русском языке строго на основе предоставленного контекста.
 
 Контекст:
 {context}
@@ -345,7 +541,8 @@ def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embedd
 Ответ:"""
     )
 
-    # Паттерны запросов о содержании конкретного файла
+
+        # Паттерны запросов о содержании конкретного файла
     _FILE_SUMMARY_PATTERNS = [
         "о чём", "о чем", "что в", "содержание", "содержит",
         "про что", "расскажи про", "опиши", "что такое", "что это"
@@ -470,7 +667,8 @@ def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embedd
                 "formatted_context": ""
             }
         try:
-            answer = llm.invoke(prompt.format(context=context, input=query)).content.strip()
+            answer_obj = llm.invoke(prompt.format(context=context, input=query))
+            answer = answer_obj.content.strip()
         except Exception as e:
             return {
                 "result": f"Ошибка при запросе к модели: {e}",
@@ -484,52 +682,17 @@ def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embedd
 
         _write_debug_chunks(query, raw_docs)
 
-        # Собираем данные для подсветки — только чанки реально использованные в ответе
-        highlight_chunks = []
+        # Подсветка: reranker скорирует чанки по вопросу, возвращаем топ релевантных.
+        # Подсвечиваем чанки целиком — честно и предсказуемо, без попыток угадать фразу.
+        highlight_chunks = _rerank_highlight(query, final_docs)
 
-        # Если LLM сообщила об отсутствии информации — ничего не подсвечиваем
-        _no_answer_markers = [
-            "информация отсутствует", "нет информации", "нет данных",
-            "не содержит", "не найдено", "не упоминается", "отсутствует в",
-            "не могу ответить", "не нашёл", "не нашел", "нет ответа",
-            "не указано", "контекст не содержит",
-        ]
-        answer_lower = answer.lower()
-        answer_has_info = not any(m in answer_lower for m in _no_answer_markers)
+        # Сортируем по позиции в файле для последовательной подсветки
+        highlight_chunks.sort(key=lambda x: (x.get("source", ""), x.get("start_char", 0)))
 
-        if answer_has_info and final_docs:
-            answer_words = set(re.findall(r'\w{4,}', answer_lower))
-            # Убираем стоп-слова чтобы не было ложных совпадений
-            answer_words -= RUSSIAN_STOP_WORDS
-
-            for doc in final_docs:
-                src = doc.metadata.get("source", "")
-                if not src:
-                    continue
-
-                # Считаем долю слов чанка которые встречаются в ответе
-                chunk_words = set(re.findall(r'\w{4,}', doc.page_content.lower()))
-                chunk_words -= RUSSIAN_STOP_WORDS
-                if not chunk_words:
-                    continue
-
-                overlap = chunk_words & answer_words
-                score = len(overlap) / len(chunk_words)
-
-                # Порог: минимум 6% слов чанка должны присутствовать в ответе
-                if score >= 0.06:
-                    highlight_chunks.append({
-                        "source": src,
-                        "start_char": doc.metadata.get("start_char"),
-                        "end_char": doc.metadata.get("end_char"),
-                        "start_line": doc.metadata.get("start_line"),
-                        "chunk_index": doc.metadata.get("chunk_index"),
-                        "text": doc.page_content,
-                        "relevance_score": score,
-                    })
-
-            # Сортируем по релевантности — самые совпадающие чанки первыми
-            highlight_chunks.sort(key=lambda x: -x["relevance_score"])
+        # Определяем какая модель реально ответила
+        model_used = openrouter_model if llm_provider == "openrouter" else model_name
+        if llm_provider == "openrouter" and hasattr(answer_obj, "model_used"):
+            model_used = answer_obj.model_used
 
         return {
             "result": answer,
@@ -538,6 +701,8 @@ def get_rag_chain(vectorstore, model_name, use_gpu=True, embedding_model="embedd
             "keywords": extract_keywords_from_query(query, top_n=7),
             "formatted_context": context[:500] + "..." if len(context) > 500 else context,
             "highlight_chunks": highlight_chunks,
+            "model_used": model_used,
+            "llm_provider": llm_provider,
         }
 
     return wrapped_qa_chain
