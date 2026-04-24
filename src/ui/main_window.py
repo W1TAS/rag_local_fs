@@ -565,7 +565,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if highlight_chunks:
             self._render_preview_with_highlights(text, highlight_chunks)
         else:
-            self.preview_browser.setPlainText(text)
+            self._show_plain_text(text)
             self.preview_title.setText(f"Document Preview — {os.path.basename(file_path)}")
 
     def _render_preview_with_highlights(self, text: str, highlight_chunks: list):
@@ -624,8 +624,8 @@ class MainWindow(QtWidgets.QMainWindow):
             highlighted = html_module.escape(text[start:end])
             html_parts.append(before)
             html_parts.append(
-                f'<mark style="background-color:#3a3000; color:#ffd966; '
-                f'border-radius:3px; padding:1px 0px;">{highlighted}</mark>'
+                f'<span style="background-color:#3a3000; color:#ffd966; '
+                f'border-radius:3px; padding:1px 0px;">{highlighted}</span>'
             )
             prev = end
 
@@ -676,11 +676,30 @@ class MainWindow(QtWidgets.QMainWindow):
     def _clear_preview_highlight(self):
         """Убирает подсветку и показывает файл в обычном виде."""
         self.clear_highlight_btn.setVisible(False)
-        if self._preview_current_path:
-            self._load_file_preview(self._preview_current_path)
+        if self._preview_current_path and self._preview_current_text:
+            self._show_plain_text(self._preview_current_text)
+            self.preview_title.setText(
+                f"Document Preview — {os.path.basename(self._preview_current_path)}"
+            )
         else:
-            self.preview_browser.setPlainText("Select a file in Files to view its contents.")
+            self._show_plain_text("Select a file in Files to view its contents.")
             self.preview_title.setText("Document Preview")
+
+    def _show_plain_text(self, text: str) -> None:
+        """Отображает plain text, полностью сбрасывая предыдущие HTML-стили."""
+        import html as _html
+        escaped = _html.escape(text).replace("\n", "<br>")
+        neutral_html = (
+            '<html><body style="'
+            'background:#1e1e1e; color:#d4d4d4; '
+            'font-family:Consolas,JetBrains Mono,monospace; font-size:12.5px; '
+            'white-space:pre-wrap; word-wrap:break-word;">'
+            f"{escaped}</body></html>"
+        )
+        self.preview_browser.setHtml(neutral_html)
+        cursor = self.preview_browser.textCursor()
+        cursor.movePosition(QtGui.QTextCursor.MoveOperation.Start)
+        self.preview_browser.setTextCursor(cursor)
 
     def _scroll_preview_to_char(self, char_pos: int, full_text: str):
         """Скроллит превью к символу char_pos."""
@@ -698,6 +717,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.preview_browser.find(anchor_text)
             found_cursor = self.preview_browser.textCursor()
             if not found_cursor.isNull():
+                # Снимаем выделение: переставляем курсор без выделения
+                found_cursor.setPosition(found_cursor.position())
                 self.preview_browser.setTextCursor(found_cursor)
                 self.preview_browser.ensureCursorVisible()
 
