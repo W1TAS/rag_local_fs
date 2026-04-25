@@ -382,6 +382,7 @@ class AutocompleteLineEdit(QtWidgets.QLineEdit):
 
     _DEBOUNCE_MS = 120
     _MIN_PREFIX = 1
+    _GHOST_X_OFFSET = 2  # Сдвиг подсказки вправо в пикселях, подбирается вручную
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -584,7 +585,7 @@ class AutocompleteLineEdit(QtWidgets.QLineEdit):
                 QtWidgets.QStyle.SubElement.SE_LineEditContents, opt, self
             )
             fm = QtGui.QFontMetrics(self.font())
-            x = rect.left() + fm.horizontalAdvance(self.text())
+            x = rect.left() + fm.horizontalAdvance(self.text()) + self._GHOST_X_OFFSET
             gr = QtCore.QRect(x, rect.top(), rect.right() - x, rect.height())
 
             label = self._ghost
@@ -654,9 +655,10 @@ class AutocompleteLineEdit(QtWidgets.QLineEdit):
             self._mode = "next"
             preds = self._model.predict_next(context_words, limit=5)
             for word, _ in preds:
-                cand = " " + word
-                if cand not in self._candidates:
-                    self._candidates.append(cand)
+                # Храним слово без ведущего пробела: пробел уже есть в тексте
+                # (текст заканчивается на пробел когда prefix=="")
+                if word not in self._candidates:
+                    self._candidates.append(word)
 
         if self._candidates:
             self._cand_idx = 0

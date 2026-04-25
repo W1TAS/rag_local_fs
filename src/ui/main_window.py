@@ -1,12 +1,13 @@
 # src/ui/main_window.py
 import os
+import re
 from datetime import datetime
 from typing import Optional
 
 from PyQt6 import QtWidgets, QtCore, QtGui
 
 from cache import clear_folder_cache, get_folder_cache_dir
-from config import MODEL_NAME, SUPPORTED_FORMATS
+from config import MODEL_NAME, SUPPORTED_FORMATS, get_llm_settings, save_settings, OPENROUTER_FREE_MODELS
 from coordinator import RAGCoordinator
 from rag import generate_suggested_questions
 from ui.autocomplete_input import AutocompleteLineEdit
@@ -403,7 +404,7 @@ class MainWindow(QtWidgets.QMainWindow):
         file_menu.addAction("Exit", self.close)
 
         tools_menu = menubar.addMenu("Tools")
-        tools_menu.addAction("Settings", self.select_folder_dialog)
+        tools_menu.addAction("Settings", self.open_settings_dialog)
         tools_menu.addSeparator()
         tools_menu.addAction("Clear Index Cache", self.on_clear_cache)
         tools_menu.addAction("Clear Summary Cache", self.on_clear_summary_cache)
@@ -425,7 +426,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.status_progress_label = QtWidgets.QLabel("Ready")
         self.status_progress_label.setStyleSheet("padding-left: 8px;")
-        self.status_model_label = QtWidgets.QLabel(f"Model: {MODEL_NAME}")
+        self.status_model_label = QtWidgets.QLabel(self._get_model_label())
         self.status_model_label.setStyleSheet("padding: 0px 8px; margin: 0px; border: none;")
 
         sb.addPermanentWidget(self.status_progress_bar, 0)
@@ -437,7 +438,7 @@ class MainWindow(QtWidgets.QMainWindow):
         sb.addPermanentWidget(spacer)
 
         self.status_settings_btn = QtWidgets.QPushButton("Settings")
-        self.status_settings_btn.clicked.connect(self.select_folder_dialog)
+        self.status_settings_btn.clicked.connect(self.open_settings_dialog)
         self.status_settings_btn.setMaximumWidth(110)
         self.status_settings_btn.setStyleSheet("margin: 2px 4px;")
         sb.addPermanentWidget(self.status_settings_btn)
@@ -617,6 +618,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
         QtCore.QThreadPool.globalInstance().start(RegenRunnable(self, prev_label))
 
+
+    def _get_model_label(self) -> str:
+        s = get_llm_settings()
+        if s["provider"] == "openrouter":
+            short = s["openrouter_model"].split("/")[-1].replace(":free", "")
+            return f"Model: {short} [cloud]"
+        return f"Model: {s['ollama_model']} [local]"
+
+    def open_settings_dialog(self):
+        dlg = SettingsDialog(self)
+        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self.status_model_label.setText(self._get_model_label())
+            # Применяем настройки без переиндексации (если папка уже выбрана)
+            if self.coordinator is not None:
+                self.coordinator.apply_llm_settings()
+
     def select_folder_dialog(self):
         folder = QtWidgets.QFileDialog.getExistingDirectory(
             self, "Select a folder for indexing", os.getcwd()
@@ -707,13 +724,17 @@ class MainWindow(QtWidgets.QMainWindow):
         if highlight_chunks:
             self._render_preview_with_highlights(text, highlight_chunks)
         else:
-            self.preview_browser.setPlainText(text)
+            self._show_plain_text(text)
             self.preview_title.setText(f"Document Preview — {os.path.basename(file_path)}")
 
     def _render_preview_with_highlights(self, text: str, highlight_chunks: list):
         """
-        Рендерит текст в превью с подсветкой чанков-источников.
+        Рендерит текст в превью с подсветкой конкретных предложений-источников.
         Использует QTextBrowser с HTML-разметкой.
+
+        Стратегия поиска позиций (в порядке приоритета):
+        1. Точные start_char/end_char из метаданных (новый sentence-level алгоритм)
+        2. Текстовый поиск предложения в файле (fallback для старых индексов)
         """
         import html as html_module
 
@@ -722,20 +743,26 @@ class MainWindow(QtWidgets.QMainWindow):
         for chunk in highlight_chunks:
             start = chunk.get("start_char")
             end = chunk.get("end_char")
-            if start is not None and end is not None and start < end <= len(text):
+            # Вариант 1: точные позиции из sentence-level алгоритма
+            if start is not None and end is not None and 0 <= start < end <= len(text):
                 ranges.append((start, end))
+                continue
 
-        if not ranges:
-            # Нет точных позиций — пробуем поиск по тексту чанка
-            for chunk in highlight_chunks:
-                chunk_text = chunk.get("text", "").strip()
-                if not chunk_text:
-                    continue
-                # Ищем первые 80 символов чанка как якорь
-                anchor = chunk_text[:80]
-                pos = text.find(anchor)
-                if pos != -1:
-                    ranges.append((pos, pos + len(chunk_text)))
+            # Вариант 2: поиск текста предложения напрямую в файле
+            chunk_text = chunk.get("text", "").strip()
+            if not chunk_text:
+                continue
+            # Ищем с нормализацией пробелов — чанк мог быть склеен из строк
+            normalized_chunk = re.sub(r'\s+', ' ', chunk_text)
+            normalized_text = re.sub(r'\s+', ' ', text)
+            pos = normalized_text.find(normalized_chunk[:120])
+            if pos != -1:
+                # Переводим позицию из нормализованного текста в оригинальный
+                # Приблизительно: считаем символы в оригинале до этой точки
+                orig_pos = self._map_normalized_pos_to_original(text, pos)
+                orig_end = orig_pos + len(chunk_text)
+                if orig_end <= len(text):
+                    ranges.append((orig_pos, min(orig_end, len(text))))
 
         # Объединяем пересекающиеся диапазоны
         ranges.sort()
@@ -756,8 +783,8 @@ class MainWindow(QtWidgets.QMainWindow):
             highlighted = html_module.escape(text[start:end])
             html_parts.append(before)
             html_parts.append(
-                f'<mark style="background-color:#3a3000; color:#ffd966; '
-                f'border-radius:3px; padding:1px 0px;">{highlighted}</mark>'
+                f'<span style="background-color:#3a3000; color:#ffd966; '
+                f'border-radius:3px; padding:1px 0px;">{highlighted}</span>'
             )
             prev = end
 
@@ -787,14 +814,51 @@ class MainWindow(QtWidgets.QMainWindow):
         self.preview_title.setTextFormat(QtCore.Qt.TextFormat.RichText)
         self.clear_highlight_btn.setVisible(True)
 
+    def _map_normalized_pos_to_original(self, original_text: str, norm_pos: int) -> int:
+        """Приближённо переводит позицию в нормализованном тексте в позицию в оригинальном."""
+        import re as _re
+        norm_chars = 0
+        orig_i = 0
+        in_space = False
+        for orig_i, ch in enumerate(original_text):
+            if norm_chars >= norm_pos:
+                return orig_i
+            if ch in (' ', '\t', '\n', '\r'):
+                if not in_space:
+                    norm_chars += 1
+                    in_space = True
+            else:
+                norm_chars += 1
+                in_space = False
+        return min(orig_i, len(original_text))
+
     def _clear_preview_highlight(self):
         """Убирает подсветку и показывает файл в обычном виде."""
         self.clear_highlight_btn.setVisible(False)
-        if self._preview_current_path:
-            self._load_file_preview(self._preview_current_path)
+        if self._preview_current_path and self._preview_current_text:
+            self._show_plain_text(self._preview_current_text)
+            self.preview_title.setText(
+                f"Document Preview — {os.path.basename(self._preview_current_path)}"
+            )
         else:
-            self.preview_browser.setPlainText("Select a file in Files to view its contents.")
+            self._show_plain_text("Select a file in Files to view its contents.")
             self.preview_title.setText("Document Preview")
+
+    def _show_plain_text(self, text: str) -> None:
+        """Отображает plain text, полностью сбрасывая предыдущие HTML-стили."""
+        import html as _html
+        escaped = _html.escape(text).replace("\n", "<br>")
+        neutral_html = (
+            '<html><body style="'
+            'background:#1e1e1e; color:#d4d4d4; '
+            'font-family:Consolas,JetBrains Mono,monospace; font-size:12.5px; '
+            'white-space:pre-wrap; word-wrap:break-word;">'
+            f"{escaped}</body></html>"
+        )
+        self.preview_browser.setHtml(neutral_html)
+        cursor = self.preview_browser.textCursor()
+        cursor.movePosition(QtGui.QTextCursor.MoveOperation.Start)
+        self.preview_browser.setTextCursor(cursor)
 
     def _scroll_preview_to_char(self, char_pos: int, full_text: str):
         """Скроллит превью к символу char_pos."""
@@ -812,6 +876,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.preview_browser.find(anchor_text)
             found_cursor = self.preview_browser.textCursor()
             if not found_cursor.isNull():
+                # Снимаем выделение: переставляем курсор без выделения
+                found_cursor.setPosition(found_cursor.position())
                 self.preview_browser.setTextCursor(found_cursor)
                 self.preview_browser.ensureCursorVisible()
 
@@ -982,6 +1048,16 @@ class MainWindow(QtWidgets.QMainWindow):
         result = response.get("result", "Нет ответа")
         sources = response.get("sources", "")
         highlight_chunks = response.get("highlight_chunks", [])
+        model_used = response.get("model_used", "")
+        llm_provider = response.get("llm_provider", "ollama")
+
+        # Обновляем статусбар с реально использованной моделью
+        if model_used:
+            if llm_provider == "openrouter":
+                short = model_used.split("/")[-1].replace(":free", "")
+                self.status_model_label.setText(f"Model: {short} [cloud]")
+            else:
+                self.status_model_label.setText(f"Model: {model_used} [local]")
 
         # If last assistant message is a partial (empty timestamp), replace it instead of appending
         last_is_partial = (
@@ -1380,3 +1456,170 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         super().closeEvent(event)
+
+class SettingsDialog(QtWidgets.QDialog):
+    """Диалог настроек LLM: выбор между Ollama (локальная) и OpenRouter (облако)."""
+
+    _STYLE = """
+    QDialog { background: #1e1e1e; color: #d4d4d4; }
+    QLabel { color: #d4d4d4; }
+    QGroupBox {
+        color: #aaaaaa; border: 1px solid #3a3a3a;
+        border-radius: 6px; margin-top: 10px; padding-top: 8px;
+    }
+    QGroupBox::title { subcontrol-origin: margin; left: 10px; color: #888; }
+    QLineEdit, QComboBox {
+        background: #2d2d2d; color: #d4d4d4;
+        border: 1px solid #3a3a3a; border-radius: 4px;
+        padding: 4px 8px; min-height: 24px;
+    }
+    QLineEdit:focus, QComboBox:focus { border-color: #5a7a9a; }
+    QComboBox QAbstractItemView { background: #2d2d2d; color: #d4d4d4; selection-background-color: #3a5a7a; }
+    QRadioButton { color: #d4d4d4; spacing: 6px; }
+    QRadioButton::indicator { width: 14px; height: 14px; }
+    QPushButton {
+        background: #2d2d2d; color: #d4d4d4;
+        border: 1px solid #3a3a3a; border-radius: 4px;
+        padding: 5px 16px; min-height: 26px;
+    }
+    QPushButton:hover { background: #3a3a3a; }
+    QPushButton#save_btn { background: #2a4a6a; border-color: #3a6a9a; }
+    QPushButton#save_btn:hover { background: #3a5a7a; }
+    QLabel#link_label { color: #5a9adf; }
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Настройки модели")
+        self.setMinimumWidth(480)
+        self.setStyleSheet(self._STYLE)
+        self._build_ui()
+        self._load_current()
+
+    def _build_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setSpacing(14)
+        layout.setContentsMargins(18, 18, 18, 18)
+
+        # --- Заголовок ---
+        title = QtWidgets.QLabel("Выбор языковой модели")
+        title.setStyleSheet("font-size: 14px; font-weight: bold; color: #e0e0e0;")
+        layout.addWidget(title)
+
+        # === Группа Ollama ===
+        grp_local = QtWidgets.QGroupBox("Локальная модель (Ollama)")
+        gl = QtWidgets.QVBoxLayout(grp_local)
+        self.rb_ollama = QtWidgets.QRadioButton("Использовать Ollama")
+        gl.addWidget(self.rb_ollama)
+
+        row_model = QtWidgets.QHBoxLayout()
+        row_model.addWidget(QtWidgets.QLabel("Модель:"))
+        self.ollama_model_edit = QtWidgets.QLineEdit()
+        self.ollama_model_edit.setPlaceholderText("например: gemma3:4b")
+        row_model.addWidget(self.ollama_model_edit)
+        gl.addLayout(row_model)
+        layout.addWidget(grp_local)
+
+        # === Группа OpenRouter ===
+        grp_cloud = QtWidgets.QGroupBox("Облачная модель (OpenRouter)")
+        gc = QtWidgets.QVBoxLayout(grp_cloud)
+        gc.setSpacing(8)
+
+        self.rb_openrouter = QtWidgets.QRadioButton("Использовать OpenRouter")
+        gc.addWidget(self.rb_openrouter)
+
+        # Ссылка на получение ключа
+        link = QtWidgets.QLabel(
+            '🔑 Ключ: <a href="https://openrouter.ai/keys" style="color:#5a9adf;">openrouter.ai/keys</a>'
+            '&nbsp;&nbsp;(Sign Up → Keys → Create Key)'
+        )
+        link.setObjectName("link_label")
+        link.setOpenExternalLinks(True)
+        link.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        gc.addWidget(link)
+
+        row_key = QtWidgets.QHBoxLayout()
+        row_key.addWidget(QtWidgets.QLabel("API Key:"))
+        self.api_key_edit = QtWidgets.QLineEdit()
+        self.api_key_edit.setPlaceholderText("sk-or-v1-...")
+        self.api_key_edit.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
+        row_key.addWidget(self.api_key_edit)
+        # Кнопка показать/скрыть ключ
+        self.show_key_btn = QtWidgets.QPushButton("👁")
+        self.show_key_btn.setMaximumWidth(34)
+        self.show_key_btn.setCheckable(True)
+        self.show_key_btn.toggled.connect(self._toggle_key_visibility)
+        row_key.addWidget(self.show_key_btn)
+        gc.addLayout(row_key)
+
+        row_m = QtWidgets.QHBoxLayout()
+        row_m.addWidget(QtWidgets.QLabel("Модель:"))
+        self.openrouter_model_combo = QtWidgets.QComboBox()
+        self.openrouter_model_combo.setEditable(True)
+        for m in OPENROUTER_FREE_MODELS:
+            self.openrouter_model_combo.addItem(m)
+        row_m.addWidget(self.openrouter_model_combo)
+        gc.addLayout(row_m)
+
+        free_note = QtWidgets.QLabel("💡 Все модели в списке бесплатны (суффикс :free)")
+        free_note.setStyleSheet("color: #888; font-size: 11px;")
+        gc.addWidget(free_note)
+
+        layout.addWidget(grp_cloud)
+
+        # --- Кнопки ---
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.addStretch()
+        cancel_btn = QtWidgets.QPushButton("Отмена")
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+        save_btn = QtWidgets.QPushButton("Сохранить")
+        save_btn.setObjectName("save_btn")
+        save_btn.clicked.connect(self._save_and_accept)
+        btn_row.addWidget(save_btn)
+        layout.addLayout(btn_row)
+
+
+    def _toggle_key_visibility(self, checked: bool):
+        mode = QtWidgets.QLineEdit.EchoMode.Normal if checked else QtWidgets.QLineEdit.EchoMode.Password
+        self.api_key_edit.setEchoMode(mode)
+
+    def _on_provider_toggled(self):
+        pass  # все поля всегда активны
+
+    def _load_current(self):
+        s = get_llm_settings()
+        self.ollama_model_edit.setText(s["ollama_model"])
+        self.api_key_edit.setText(s["openrouter_key"])
+
+        # Установить модель в комбобоксе
+        idx = self.openrouter_model_combo.findText(s["openrouter_model"])
+        if idx >= 0:
+            self.openrouter_model_combo.setCurrentIndex(idx)
+        else:
+            self.openrouter_model_combo.setCurrentText(s["openrouter_model"])
+
+        if s["provider"] == "openrouter":
+            self.rb_openrouter.setChecked(True)
+        else:
+            self.rb_ollama.setChecked(True)
+
+
+    def _save_and_accept(self):
+        provider = "openrouter" if self.rb_openrouter.isChecked() else "ollama"
+        key = self.api_key_edit.text().strip()
+
+        if provider == "openrouter" and not key:
+            QtWidgets.QMessageBox.warning(
+                self, "API Key required",
+                "Введите API ключ OpenRouter.\nПолучить: https://openrouter.ai/keys"
+            )
+            return
+
+        save_settings({
+            "provider":         provider,
+            "ollama_model":     self.ollama_model_edit.text().strip() or "gemma3:4b",
+            "openrouter_key":   key,
+            "openrouter_model": self.openrouter_model_combo.currentText().strip(),
+        })
+        self.accept()
